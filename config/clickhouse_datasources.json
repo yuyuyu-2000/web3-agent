@@ -1,0 +1,48 @@
+{
+  "datasources": [
+    {
+      "id": "trx_5886",
+      "label": "TRON ClickHouse 5886 数据源",
+      "host": "10.8.6.153",
+      "port": 5886,
+      "default_database": "trx",
+      "secure": false,
+      "user_env": "CLICKHOUSE_TRX_5886_USER",
+      "password_env": "CLICKHOUSE_TRX_5886_PASSWORD",
+      "description": "TODO: 请补充该数据源主要包含的数据内容。例如：TRON 链交易、TRC20 转账、USDT 转账、地址画像等。",
+      "databases": [
+        {
+          "name": "trx",
+          "description": "TODO: 请补充 trx database 的业务含义、核心表和字段说明。"
+        }
+      ],
+      "usage_notes": [
+        "TODO: 请补充该数据源适合回答的问题类型。",
+        "查询业务数据前先 SHOW TABLES / DESCRIBE TABLE。",
+        "不要把该数据源的局部查询结果说成全量链上事实。"
+      ]
+    },
+    {
+      "id": "analytics_5887",
+      "label": "ClickHouse 5887 数据源",
+      "host": "10.8.6.153",
+      "port": 5887,
+      "default_database": "default",
+      "secure": false,
+      "user_env": "CLICKHOUSE_ANALYTICS_5887_USER",
+      "password_env": "CLICKHOUSE_ANALYTICS_5887_PASSWORD",
+      "description": "TODO: 请同事补充该数据源的数据内容说明、覆盖范围和适用问题。",
+      "databases": [
+        {
+          "name": "default",
+          "description": "TODO: 请补充 default database 中主要表的含义。"
+        }
+      ],
+      "usage_notes": [
+        "TODO: 请补充该数据源适合回答的问题类型。",
+        "查询业务数据前先 SHOW DATABASES / SHOW TABLES / DESCRIBE TABLE。",
+        "不要把 5887 数据源中的局部结果说成全部链上事实。"
+      ]
+    }
+  ]
+}

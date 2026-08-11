@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+*.logs
+*.egg-info/
+
+.vscode/
+# macOS
+.DS_Store
+
+# Local test outputs
+tmp/
+.tmp/
+
+# Generated chart outputs
+charts/
+
+tasks.json

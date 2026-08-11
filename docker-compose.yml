@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: chaincloud-local-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chaincloud
+      POSTGRES_PASSWORD: chaincloud_dev
+      POSTGRES_DB: chaincloud_memory_dev
+    ports:
+      - "${POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - chaincloud_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chaincloud -d chaincloud_memory_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  chaincloud_postgres_data:

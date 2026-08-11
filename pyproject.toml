@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chaincloud-agent-service"
+version = "0.1.0"
+description = "ChainCloud AI：FastAPI + LangGraph 智能体 HTTP 服务"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
+    "psycopg[binary]>=3.2.0",
+    "psycopg-pool>=3.2.0",
+    "python-dotenv>=1.2.2",
+    "clickhouse-connect>=0.15.1",
+    "pandas>=2.2.0",
+    "plotly>=5.24.0",
+    "apscheduler>=3.10.4",
+    "sentence-transformers>=5.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
