@@ -11,6 +11,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from chaincloud_agent_service.agent import graph as graph_module
 from chaincloud_agent_service.agent.permission import evaluate_step_permission
 from chaincloud_agent_service.agent.planning.models import PlanStep
+from chaincloud_agent_service.agent.state_validation import validate_step_state
 
 
 def test_readonly_tool_is_allowed_without_confirmation() -> None:
@@ -45,6 +46,47 @@ def test_obvious_privilege_escalation_is_denied() -> None:
     assert decision.risk_level == "critical"
 
 
+def test_state_validation_requests_missing_schedule() -> None:
+    step = PlanStep(
+        id="step_1", objective="创建监控任务", success_criteria="任务已保存",
+        suggested_tools=["add_scheduled_task"], requires_confirmation=True,
+    )
+    decision = validate_step_state(
+        step,
+        conversation_text="帮我创建监控任务",
+        dependency_results=[],
+        clarified_state={},
+        available_tool_names={"add_scheduled_task"},
+    )
+    assert decision.action == "MISSING"
+    assert decision.resolution == "clarification"
+    assert decision.missing_state[0].field == "schedule_spec"
+
+    resolved = validate_step_state(
+        step,
+        conversation_text="帮我创建监控任务",
+        dependency_results=[],
+        clarified_state={"schedule_spec": "每天 08:00"},
+        available_tool_names={"add_scheduled_task"},
+    )
+    assert resolved.action == "VALID"
+
+
+def test_state_validation_fails_for_unavailable_tool() -> None:
+    decision = validate_step_state(
+        PlanStep(
+            id="step_1", objective="执行任务", success_criteria="完成",
+            suggested_tools=["missing_tool"],
+        ),
+        conversation_text="执行任务",
+        dependency_results=[],
+        clarified_state={},
+        available_tool_names=set(),
+    )
+    assert decision.action == "MISSING"
+    assert decision.resolution == "fail"
+
+
 def test_graph_pauses_and_resumes_after_exact_permission_approval() -> None:
     tool = StructuredTool.from_function(
         name="add_scheduled_task", description="create task", func=lambda **_: "created"
@@ -62,7 +104,7 @@ def test_graph_pauses_and_resumes_after_exact_permission_approval() -> None:
             if "任务规划器" in system:
                 return AIMessage(content=(
                     '{"goal":"创建任务","steps":[{"id":"step_1",'
-                    '"objective":"创建每天运行的任务","success_criteria":"任务已创建",'
+                    '"objective":"创建监控任务","success_criteria":"任务已创建",'
                     '"suggested_tools":["add_scheduled_task"],"depends_on":[],'
                     '"requires_confirmation":true}]}'
                 ))
@@ -89,7 +131,7 @@ def test_graph_pauses_and_resumes_after_exact_permission_approval() -> None:
 
     config = {"configurable": {"thread_id": "permission-resume"}}
     paused = asyncio.run(graph.ainvoke(
-        {"messages": [HumanMessage(content="创建任务")], "requested_mode": "planned"},
+        {"messages": [HumanMessage(content="创建监控任务")], "requested_mode": "planned"},
         config=config,
     ))
     assert paused["status"] == "waiting_confirmation"
@@ -106,6 +148,18 @@ def test_graph_pauses_and_resumes_after_exact_permission_approval() -> None:
                 "failure_reason": None,
             },
             as_node="select_step",
+        )
+        blocked = await graph.ainvoke(None, config=config)
+        assert blocked["status"] == "blocked_missing_state"
+        assert blocked["state_validation"]["missing_state"][0]["field"] == "schedule_spec"
+        await graph.aupdate_state(
+            config,
+            {
+                "clarified_state": {"schedule_spec": "每天 08:00"},
+                "status": "executing",
+                "failure_reason": None,
+            },
+            as_node="permission_gate",
         )
         return await graph.ainvoke(None, config=config)
 

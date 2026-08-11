@@ -58,6 +58,7 @@ class ChatResponse(BaseModel):
     reply: str
     trace: list[ChatTraceEvent] | None = None
     permission_required: dict[str, Any] | None = None
+    clarification_required: dict[str, Any] | None = None
 
 
 class PermissionApprovalRequest(BaseModel):
@@ -65,6 +66,13 @@ class PermissionApprovalRequest(BaseModel):
     step_id: str = Field(..., min_length=1)
     tool_name: str = Field(..., min_length=1)
     decision: Literal["approve", "cancel"]
+
+
+class ClarificationRequest(BaseModel):
+    thread_id: str = Field(..., min_length=1)
+    step_id: str = Field(..., min_length=1)
+    values: dict[str, Any] = Field(default_factory=dict)
+    decision: Literal["submit", "cancel"] = "submit"
 
 
 def _ndjson_event(event_type: str, **payload: Any) -> bytes:
@@ -374,6 +382,71 @@ async def approve_permission(
         result.get("pending_permission"), dict
     ):
         return ChatResponse(reply="", permission_required=result["pending_permission"])
+    if result.get("status") == "blocked_missing_state" and isinstance(
+        result.get("state_validation"), dict
+    ):
+        return ChatResponse(
+            reply="", clarification_required=result["state_validation"]
+        )
+    messages = result.get("messages", [])
+    last = messages[-1] if messages else None
+    text = _strip_reasoning_blocks(
+        _message_content_to_text(getattr(last, "content", "") if last else "")
+    )
+    text = _append_chart_urls(text, _extract_chart_urls(messages))
+    return ChatResponse(reply=text)
+
+
+@router.post(
+    "/chat/clarification",
+    response_model=ChatResponse,
+    response_model_exclude_none=True,
+)
+async def submit_clarification(
+    request: Request,
+    body: ClarificationRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> ChatResponse:
+    """Store missing state for one blocked step and resume validation."""
+    optional_authenticated_user_or_static_auth(request, authorization)
+    graph = request.app.state.graph
+    config = {"configurable": {"thread_id": body.thread_id}}
+    snapshot = await graph.aget_state(config)
+    state = snapshot.values or {}
+    validation = state.get("state_validation")
+    if state.get("status") != "blocked_missing_state" or not isinstance(
+        validation, dict
+    ):
+        raise HTTPException(status_code=409, detail="当前线程没有待补充的信息")
+    if validation.get("step_id") != body.step_id:
+        raise HTTPException(status_code=409, detail="补充信息与当前阻塞步骤不匹配")
+
+    if body.decision == "cancel":
+        await graph.aupdate_state(
+            config,
+            {"status": "failed", "failure_reason": "用户已取消补充信息"},
+        )
+        return ChatResponse(reply="已取消补充信息，当前步骤未执行。")
+    if not body.values:
+        raise HTTPException(status_code=422, detail="请提供至少一个待补充字段")
+
+    clarified = {**state.get("clarified_state", {}), **body.values}
+    await graph.aupdate_state(
+        config,
+        {
+            "clarified_state": clarified,
+            "status": "executing",
+            "failure_reason": None,
+        },
+        as_node="permission_gate",
+    )
+    result = await graph.ainvoke(None, config=config)
+    if result.get("status") == "blocked_missing_state" and isinstance(
+        result.get("state_validation"), dict
+    ):
+        return ChatResponse(
+            reply="", clarification_required=result["state_validation"]
+        )
     messages = result.get("messages", [])
     last = messages[-1] if messages else None
     text = _strip_reasoning_blocks(
@@ -401,6 +474,7 @@ async def chat_stream(
         buffer_for_review = False
         awaiting_permission = False
         permission_halted = False
+        awaiting_clarification = False
         stripper = _IncrementalReasoningStripper()
         yield _ndjson_event("status", content="正在思考...")
 
@@ -485,6 +559,15 @@ async def chat_stream(
                                 "error",
                                 message=pending.get("reason", "操作已被权限策略拒绝"),
                             )
+                    elif node_name == "state_validation" and isinstance(update, dict):
+                        validation = update.get("state_validation")
+                        if (
+                            update.get("state_validation_action") == "MISSING"
+                            and update.get("block_resolution") == "clarification"
+                            and isinstance(validation, dict)
+                        ):
+                            awaiting_clarification = True
+                            yield _ndjson_event("clarification_required", **validation)
                     elif node_name == "evaluator" and isinstance(update, dict):
                         action = update.get("evaluation_action")
                         yield _ndjson_event(
@@ -519,7 +602,7 @@ async def chat_stream(
                             "status", content="执行预算已达到上限，正在整理部分结果..."
                         )
 
-            if awaiting_permission or permission_halted:
+            if awaiting_permission or permission_halted or awaiting_clarification:
                 return
 
             tail = stripper.feed("", final=True)

@@ -3,6 +3,7 @@ import type {
   ChatRequest,
   ChatResponse,
   ChatStreamEvent,
+  ClarificationRequest,
   LoginRequest,
   MemoryListResponse,
   MemoryRecord,
@@ -119,6 +120,28 @@ export function decidePermission(
         thread_id: threadId,
         step_id: permission.step_id,
         tool_name: permission.tool_name,
+        decision
+      })
+    },
+    authToken ? { authToken, useStaticToken: false } : {}
+  );
+}
+
+export function submitClarification(
+  threadId: string,
+  clarification: ClarificationRequest,
+  values: Record<string, string>,
+  decision: "submit" | "cancel",
+  authToken?: string
+): Promise<ChatResponse> {
+  return requestJson<ChatResponse>(
+    "/chat/clarification",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        thread_id: threadId,
+        step_id: clarification.step_id,
+        values,
         decision
       })
     },

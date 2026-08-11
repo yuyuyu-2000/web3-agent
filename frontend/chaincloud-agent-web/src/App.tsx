@@ -7,12 +7,14 @@ import {
   getMemories,
   getTools,
   streamChat,
+  submitClarification,
   summarizeMemory
 } from "./api";
 import LoginPage from "./LoginPage";
 import type {
   AuthTokenResponse,
   ChatMessage,
+  ClarificationRequest,
   MemoryRecord,
   PermissionRequest,
   ToolInfo,
@@ -498,6 +500,8 @@ export default function App() {
   const [sideLoading, setSideLoading] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
   const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
+  const [pendingClarification, setPendingClarification] = useState<ClarificationRequest | null>(null);
+  const [clarificationValues, setClarificationValues] = useState<Record<string, string>>({});
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const AUTO_SUMMARIZE_THRESHOLD = 8;
 
@@ -577,6 +581,9 @@ export default function App() {
     setCurrentUser(auth.user);
     setThreadId(makeThreadId(auth.user.username));
     setMemoryKey(makeMemoryKey(auth.user.username));
+    setPendingPermission(null);
+    setPendingClarification(null);
+    setClarificationValues({});
     setMessages((prev) => [
       ...prev,
       {
@@ -593,6 +600,9 @@ export default function App() {
     setCurrentUser(null);
     setThreadId(makeThreadId());
     setMemoryKey(makeMemoryKey());
+    setPendingPermission(null);
+    setPendingClarification(null);
+    setClarificationValues({});
     setMessages((prev) => [
       ...prev,
       { id: newId("system"), role: "system", content: "已退出登录，当前为未登录体验模式。" }
@@ -602,7 +612,7 @@ export default function App() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = input.trim();
-    if (!trimmed || loading || pendingPermission) return;
+    if (!trimmed || loading || pendingPermission || pendingClarification) return;
 
     const userMessage: ChatMessage = {
       id: newId("user"),
@@ -632,6 +642,10 @@ export default function App() {
           if (event.type === "error") throw new Error(event.message);
           if (event.type === "permission_required") {
             setPendingPermission(event);
+            setMessages((prev) => prev.filter((item) => item.id !== assistantId));
+          } else if (event.type === "clarification_required") {
+            setPendingClarification(event);
+            setClarificationValues({});
             setMessages((prev) => prev.filter((item) => item.id !== assistantId));
           } else if (event.type === "status") {
             setMessages((prev) => prev.map((message) =>
@@ -688,6 +702,8 @@ export default function App() {
     try {
       const response = await decidePermission(threadId, permission, decision, authToken);
       setPendingPermission(response.permission_required || null);
+      setPendingClarification(response.clarification_required || null);
+      if (response.clarification_required) setClarificationValues({});
       setMessages((prev) => [
         ...prev,
         ...(decision === "approve" && response.reply
@@ -701,6 +717,35 @@ export default function App() {
       setMessages((prev) => [
         ...prev,
         { id: newId("error"), role: "error", content: `审批失败：${message}` }
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleClarificationDecision(decision: "submit" | "cancel") {
+    if (!pendingClarification || loading) return;
+    const clarification = pendingClarification;
+    setLoading(true);
+    try {
+      const response = await submitClarification(
+        threadId, clarification, clarificationValues, decision, authToken
+      );
+      setPendingClarification(response.clarification_required || null);
+      if (!response.clarification_required) setClarificationValues({});
+      setMessages((prev) => [
+        ...prev,
+        ...(decision === "submit" && response.reply
+          ? buildAssistantMessages(response.reply, response.trace)
+          : decision === "cancel"
+            ? [{ id: newId("system"), role: "system" as const, content: response.reply }]
+            : [])
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setMessages((prev) => [
+        ...prev,
+        { id: newId("error"), role: "error", content: `补充信息失败：${message}` }
       ]);
     } finally {
       setLoading(false);
@@ -751,6 +796,9 @@ export default function App() {
   function handleNewChat() {
     setThreadId(makeThreadId(currentUser?.username));
     setMemoryKey(makeMemoryKey(currentUser?.username));
+    setPendingPermission(null);
+    setPendingClarification(null);
+    setClarificationValues({});
     setMessages([
       {
         id: newId("welcome"),
@@ -966,6 +1014,38 @@ export default function App() {
               </div>
             </article>
           ) : null}
+          {pendingClarification ? (
+            <article className="permission-card clarification-card">
+              <div className="permission-card-header">
+                <strong>还需要你补充一些信息</strong>
+              </div>
+              <p>{pendingClarification.reason}</p>
+              {pendingClarification.missing_state.map((item) => (
+                <label className="clarification-field" key={item.field}>
+                  <span>{item.question}</span>
+                  <small>{item.reason}；格式：{item.expected_format}</small>
+                  <input
+                    value={clarificationValues[item.field] || ""}
+                    onChange={(event) => setClarificationValues((prev) => ({
+                      ...prev,
+                      [item.field]: event.target.value
+                    }))}
+                  />
+                </label>
+              ))}
+              <div className="permission-actions">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={loading || pendingClarification.missing_state.some(
+                    (item) => !(clarificationValues[item.field] || "").trim()
+                  )}
+                  onClick={() => void handleClarificationDecision("submit")}
+                >继续</button>
+                <button type="button" disabled={loading} onClick={() => void handleClarificationDecision("cancel")}>取消</button>
+              </div>
+            </article>
+          ) : null}
           <div ref={bottomRef} />
         </div>
 
@@ -981,7 +1061,9 @@ export default function App() {
               }
             }}
           />
-          <button className="primary" disabled={loading || !input.trim() || Boolean(pendingPermission)}>
+          <button className="primary" disabled={
+            loading || !input.trim() || Boolean(pendingPermission) || Boolean(pendingClarification)
+          }>
             {loading ? "发送中..." : "发送"}
           </button>
         </form>

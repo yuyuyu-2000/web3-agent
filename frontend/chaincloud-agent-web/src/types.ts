@@ -27,6 +27,7 @@ export interface ChatResponse {
   reply: string;
   trace?: ChatTraceEvent[];
   permission_required?: PermissionRequest;
+  clarification_required?: ClarificationRequest;
 }
 
 export type ChatStreamEvent =
@@ -34,6 +35,7 @@ export type ChatStreamEvent =
   | { type: "delta"; content: string }
   | { type: "done"; reply: string; trace?: ChatTraceEvent[] }
   | ({ type: "permission_required" } & PermissionRequest)
+  | ({ type: "clarification_required" } & ClarificationRequest)
   | { type: "error"; message: string };
 
 export interface PermissionRequest {
@@ -43,6 +45,20 @@ export interface PermissionRequest {
   reason: string;
   operation_summary: string;
   estimated_impact: string;
+}
+
+export interface MissingStateField {
+  field: string;
+  reason: string;
+  question: string;
+  expected_format: string;
+}
+
+export interface ClarificationRequest {
+  step_id: string;
+  resolution: "clarification" | "partial" | "fail";
+  missing_state: MissingStateField[];
+  reason: string;
 }
 
 export interface MemoryRecord {

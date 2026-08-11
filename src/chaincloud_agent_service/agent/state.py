@@ -12,7 +12,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[Any], add_messages]
     requested_mode: NotRequired[Literal["auto", "direct", "planned"]]
     execution_mode: NotRequired[Literal["direct", "planned"] | None]
-    route_action: NotRequired[Literal["route", "resume", "cancel"]]
+    route_action: NotRequired[Literal["route", "resume", "clarify", "cancel"]]
     route_reason: NotRequired[str | None]
     route_confidence: NotRequired[float | None]
     route_source: NotRequired[
@@ -25,6 +25,10 @@ class AgentState(TypedDict):
     approved_permission_keys: NotRequired[list[str]]
     pending_permission: NotRequired[dict[str, Any] | None]
     permission_action: NotRequired[Literal["ALLOW", "NEED_CONFIRM", "DENY"] | None]
+    clarified_state: NotRequired[dict[str, Any]]
+    state_validation: NotRequired[dict[str, Any] | None]
+    state_validation_action: NotRequired[Literal["VALID", "MISSING"] | None]
+    block_resolution: NotRequired[Literal["clarification", "partial", "fail"] | None]
     step_results: NotRequired[list[dict[str, Any]]]
     candidate_step_result: NotRequired[dict[str, Any] | None]
     step_message_start: NotRequired[int]
@@ -52,6 +56,7 @@ class AgentState(TypedDict):
             "failed",
             "waiting_confirmation",
             "permission_denied",
+            "blocked_missing_state",
         ]
     ]
     failure_reason: NotRequired[str | None]

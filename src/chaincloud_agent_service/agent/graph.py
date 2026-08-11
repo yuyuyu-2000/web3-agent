@@ -19,6 +19,7 @@ from chaincloud_agent_service.agent.review import direct_requires_review, review
 from chaincloud_agent_service.agent.routing import decide_route
 from chaincloud_agent_service.agent.schema_context import build_agent_system_prompt
 from chaincloud_agent_service.agent.state import AgentState
+from chaincloud_agent_service.agent.state_validation import validate_step_state
 from chaincloud_agent_service.config import Settings
 from chaincloud_agent_service.tools.registry import get_tools
 
@@ -121,6 +122,7 @@ def _step_execution_prompt(state: AgentState) -> str:
         f"成功标准：{step.success_criteria}\n"
         f"建议工具：{', '.join(step.suggested_tools) or '由你按需选择'}\n"
         f"依赖步骤结果：{json.dumps(dependencies, ensure_ascii=False)}\n"
+        f"用户补充的执行状态：{json.dumps(state.get('clarified_state', {}), ensure_ascii=False)}\n"
         f"本步骤剩余工具调用额度：{MAX_STEP_TOOL_CALLS - state.get('step_tool_call_count', 0)}\n"
         "需要数据时调用工具；已有足够信息时直接给出本步骤的结果摘要。"
     )
@@ -146,6 +148,9 @@ def compile_agent_graph(
     checkpointer: BaseCheckpointSaver,
 ):
     tools = get_tools(settings)
+    available_tool_names = {
+        str(getattr(tool, "name", tool.__class__.__name__)) for tool in tools
+    }
     system_prompt = build_agent_system_prompt(settings)
     base_model = ChatOpenAI(
         model=settings.openai_model,
@@ -159,6 +164,22 @@ def compile_agent_graph(
 
     def prepare_request_node(state: AgentState) -> dict[str, Any]:
         goal = _latest_user_question(list(state["messages"]))
+        if state.get("status") == "blocked_missing_state":
+            if _is_cancellation(goal):
+                return {
+                    "route_action": "cancel",
+                    "status": "failed",
+                    "failure_reason": "用户已取消补充信息",
+                }
+            return {
+                "route_action": "clarify",
+                "clarified_state": {
+                    **state.get("clarified_state", {}),
+                    "free_text": goal,
+                },
+                "status": "executing",
+                "failure_reason": None,
+            }
         if (
             state.get("status") == "waiting_confirmation"
             and state.get("plan")
@@ -224,6 +245,10 @@ def compile_agent_graph(
             "approved_permission_keys": [],
             "pending_permission": None,
             "permission_action": None,
+            "clarified_state": {},
+            "state_validation": None,
+            "state_validation_action": None,
+            "block_resolution": None,
             "step_results": [],
             "candidate_step_result": None,
             "planner_attempts": 0,
@@ -261,6 +286,10 @@ def compile_agent_graph(
             "approved_permission_keys": [],
             "pending_permission": None,
             "permission_action": None,
+            "clarified_state": {},
+            "state_validation": None,
+            "state_validation_action": None,
+            "block_resolution": None,
             "step_results": [],
             "candidate_step_result": None,
             "step_message_start": len(state["messages"]),
@@ -332,6 +361,10 @@ def compile_agent_graph(
                 "evaluation_action": None,
                 "evaluation_feedback": None,
                 "step_message_start": len(state["messages"]),
+                "clarified_state": {},
+                "state_validation": None,
+                "state_validation_action": None,
+                "block_resolution": None,
                 "status": "executing",
             }
 
@@ -379,7 +412,42 @@ def compile_agent_graph(
         return update
 
     def permission_gate_route(state: AgentState) -> str:
-        return "execute" if state.get("permission_action") == "ALLOW" else "finish"
+        return "validate" if state.get("permission_action") == "ALLOW" else "finish"
+
+    def state_validation_node(state: AgentState) -> dict[str, Any]:
+        plan = _plan_from_state(state)
+        current_step_id = state.get("current_step_id")
+        step = next(item for item in plan.steps if item.id == current_step_id)
+        messages = list(state["messages"])
+        conversation_text = "\n".join(_message_text(message) for message in messages)
+        decision = validate_step_state(
+            step,
+            conversation_text=conversation_text,
+            dependency_results=state.get("step_results", []),
+            clarified_state=state.get("clarified_state", {}),
+            available_tool_names=available_tool_names,
+        )
+        return {
+            "state_validation": decision.model_dump(),
+            "state_validation_action": decision.action,
+            "block_resolution": decision.resolution,
+            "status": "executing" if decision.action == "VALID" else "blocked_missing_state",
+            "failure_reason": None if decision.action == "VALID" else decision.reason,
+        }
+
+    def state_validation_route(state: AgentState) -> str:
+        return "execute" if state.get("state_validation_action") == "VALID" else "blocked"
+
+    def blocked_missing_state_node(state: AgentState) -> dict[str, Any]:
+        resolution = state.get("block_resolution") or "fail"
+        if resolution == "clarification":
+            return {"status": "blocked_missing_state"}
+        if resolution == "partial":
+            return {"status": "partial"}
+        return {"status": "failed"}
+
+    def blocked_missing_state_route(state: AgentState) -> str:
+        return "wait" if state.get("status") == "blocked_missing_state" else "finish"
 
     def executor_node(state: AgentState) -> dict[str, list[Any]]:
         msgs: list[Any] = list(state["messages"])
@@ -565,6 +633,10 @@ def compile_agent_graph(
             "approved_permission_keys": [],
             "pending_permission": None,
             "permission_action": None,
+            "clarified_state": {},
+            "state_validation": None,
+            "state_validation_action": None,
+            "block_resolution": None,
             "evaluation_action": None,
             "status": "planning",
             "failure_reason": None,
@@ -642,6 +714,8 @@ def compile_agent_graph(
     builder.add_node("planner", planner_node)
     builder.add_node("select_step", select_step_node)
     builder.add_node("permission_gate", permission_gate_node)
+    builder.add_node("state_validation", state_validation_node)
+    builder.add_node("blocked_missing_state", blocked_missing_state_node)
     builder.add_node("executor", executor_node)
     builder.add_node("complete_step", complete_step_node)
     builder.add_node("evaluator", evaluator_node)
@@ -657,7 +731,12 @@ def compile_agent_graph(
     builder.add_conditional_edges(
         "prepare_request",
         prepare_request_route,
-        {"route": "router", "resume": "select_step", "cancel": "review_gate"},
+        {
+            "route": "router",
+            "resume": "select_step",
+            "clarify": "state_validation",
+            "cancel": "review_gate",
+        },
     )
     builder.add_conditional_edges(
         "router",
@@ -683,7 +762,17 @@ def compile_agent_graph(
     builder.add_conditional_edges(
         "permission_gate",
         permission_gate_route,
-        {"execute": "executor", "finish": END},
+        {"validate": "state_validation", "finish": END},
+    )
+    builder.add_conditional_edges(
+        "state_validation",
+        state_validation_route,
+        {"execute": "executor", "blocked": "blocked_missing_state"},
+    )
+    builder.add_conditional_edges(
+        "blocked_missing_state",
+        blocked_missing_state_route,
+        {"wait": END, "finish": "review_gate"},
     )
     executor_destinations = {
         "complete_step": "complete_step",

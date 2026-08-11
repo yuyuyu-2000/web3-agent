@@ -164,10 +164,15 @@ flowchart TD
     PLAN --> SELECT
     SELECT -->|步骤可执行| PERMISSION[permission_gate]
     SELECT -->|完成/部分完成| GATE
-    PERMISSION -->|ALLOW| EXEC[executor]
+    PERMISSION -->|ALLOW| STATE[state_validation]
     PERMISSION -->|NEED_CONFIRM| WAIT([保存 checkpoint 并等待审批])
     PERMISSION -->|DENY| DENIED([拒绝执行])
     WAIT -->|POST /chat/permission approve| PERMISSION
+    STATE -->|VALID| EXEC[executor]
+    STATE -->|MISSING| BLOCKED[blocked_missing_state]
+    BLOCKED -->|clarification| CLARIFY([等待用户补充信息])
+    BLOCKED -->|partial / fail| GATE
+    CLARIFY -->|POST /chat/clarification| STATE
     EXEC -->|需要工具且未超预算| TOOLS
     TOOLS -->|Planned| EXEC
     EXEC -->|形成步骤结果| COMPLETE[complete_step]
@@ -213,13 +218,30 @@ flowchart TD
 
 上述文本确认/取消逻辑继续保留为兼容兜底；正常前端审批不再伪装成聊天消息。
 
-### 6.4 Direct 路径
+### 6.4 State Validation 与澄清恢复
+
+权限通过后，`state_validation` 会在 Executor 之前检查当前步骤、对话、依赖结果、
+已补充字段和可用工具。判断由 `agent/state_validation.py` 的代码规则完成，不让
+LLM 自行决定状态是否充分。
+
+- `VALID`：进入 Executor；
+- 缺少用户可提供的字段：进入 `blocked_missing_state`，流式发送
+  `clarification_required`；
+- 已有可靠结果但后续条件不可补齐：可转为 `partial`；
+- 工具或系统能力不可用：转为 `fail`。
+
+`clarification_required` 包含字段名、缺失原因、面向用户的问题和期望格式。前端
+展示输入卡片，通过 `POST /chat/clarification` 提交 `thread_id + step_id + values`。
+后端把值写入 checkpoint，再次执行 `state_validation`。普通聊天输入仍可作为兼容
+补充方式，但结构化接口是正常路径。
+
+### 6.5 Direct 路径
 
 Direct 适合无需工具或单一工具即可完成、无跨源依赖、无副作用的请求。执行器可循环调用工具，但不会向用户展示计划。得到文本后进入统一回答合成阶段。
 
 Direct 并非一定跳过 Reviewer。高风险主题、复杂信号或多工具调用仍会触发最终审查。
 
-### 6.5 Planned 路径
+### 6.6 Planned 路径
 
 Planned 适合多步骤、多数据源、存在依赖、需要证据链/报告/图表/比较/风险评估，或可能修改外部状态的任务：
 
@@ -227,13 +249,14 @@ Planned 适合多步骤、多数据源、存在依赖、需要证据链/报告/�
 2. Validator 检查步骤 ID、依赖关系和工具引用；无效输出会重试，之后降级到安全单步骤计划。
 3. `select_step` 只选择依赖均成功的未完成步骤。
 4. `permission_gate` 用代码规则审核当前步骤；需要确认时保存 checkpoint 并暂停。
-5. Executor 只执行已允许的当前步骤，并获得已完成依赖步骤的结果。
-6. `complete_step` 收集文本结果、工具名及工具证据，形成 `StepResult`。
-7. Evaluator 根据成功标准返回 `pass`、`retry`、`replan`、`partial` 或 `fail`。
-8. 所有可执行步骤完成后，Answer Composer 根据结构化摘要生成面向用户的最终回答。
-9. Planned 回答默认进入 Reviewer，检查证据一致性和事实边界；需要时重新合成。
+5. `state_validation` 检查执行前必要状态；缺失时请求澄清或转为 partial/fail。
+6. Executor 只执行已允许且状态完整的当前步骤，并获得已完成依赖步骤的结果。
+7. `complete_step` 收集文本结果、工具名及工具证据，形成 `StepResult`。
+8. Evaluator 根据成功标准返回 `pass`、`retry`、`replan`、`partial` 或 `fail`。
+9. 所有可执行步骤完成后，Answer Composer 根据结构化摘要生成面向用户的最终回答。
+10. Planned 回答默认进入 Reviewer，检查证据一致性和事实边界；需要时重新合成。
 
-### 6.6 安全预算与终止条件
+### 6.7 安全预算与终止条件
 
 图中设置了硬限制，避免工具或模型循环失控：
 
