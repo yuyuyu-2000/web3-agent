@@ -45,25 +45,26 @@ agent → tools → agent → compose_answer
 
 ## 3. 推荐总体架构
 
-> 当前实施决策（2026-08-07）：第一版暂不引入 Router。所有新请求都先经过
-> Planner，简单请求生成单步骤计划，复杂请求生成多步骤计划。待积累计划耗时、
-> 成本和步骤数量等真实数据后，再决定是否增加 direct/planned 路由。
+> 当前实施决策（2026-08-11）：已在第一版 Planning 基础上加入 Router。Router
+> 依次使用 API 强制模式、确定性高置信度规则和模型分类，将请求分为 Direct 与
+> Planned；模型分类失败或低置信度时保守进入 Planned。等待确认的计划优先于
+> 新的路由判断。
 
-第一版实际链路为：
+当前实际链路为：
 
 ```text
-用户请求 → Planner → Select Step → Executor ↔ Tools
-                              ↑           ↓
-                              └─ Complete Step
-                                      ↓
-                              Answer Composer
+                            ┌→ Direct Agent ↔ Tools ──────────┐
+用户请求 → Prepare → Router                                  ├→ Answer Composer
+                            └→ Planner → Select Step           │
+                                           ↓                  │
+                                      Executor ↔ Tools        │
+                                           ↓                  │
+                                      Complete Step ──────────┘
 ```
 
-第一版包含结构化计划、依赖校验、单步执行、工具调用预算、checkpoint 状态、
-副作用步骤确认和流式进度事件。第一版不包含模型驱动的独立 Evaluator、动态
-Replan、并行步骤和 Router。
-
-以下带 Router 的架构作为后续演进方向保留。
+当前版本包含 Direct/Planned 分流、结构化计划、依赖校验、单步执行、工具调用
+预算、checkpoint 状态、副作用步骤确认和流式进度事件。暂不包含模型驱动的
+独立 Evaluator、动态 Replan、并行步骤和 Direct 自动升级 Planned。
 
 ```text
                          ┌── simple ──→ Agent/Tools ─────────┐
@@ -449,21 +450,32 @@ planning 状态应随 LangGraph checkpoint 一起保存，至少包括：
 
 ## 18. 推荐实施阶段
 
-### 第一阶段：最小可用 Planning
+### 第一阶段：最小可用 Planning（已完成）
 
 1. 定义 `Plan`、`PlanStep` 和 `StepResult`；
 2. 扩展 LangGraph State；
-3. 增加 Planner，所有请求均生成计划；
-4. 简单请求使用单步骤计划；
+3. 增加 Planner，初始版本所有请求均生成计划；
+4. 初始版本简单请求使用单步骤计划；
 5. 增加单步骤 Executor；
 6. Executor 暂时复用现有 Agent 和 ToolNode；
 7. 加入步骤和工具调用上限；
 8. 保持 `/chat` 请求及响应兼容；
-9. 记录 Planner 的耗时和计划规模，为后续 Router 提供依据。
+9. 为后续 Router 保留独立执行模式字段。
 
 第一阶段应先解决任务拆解、进度保存和有界执行问题，不急于实现复杂的自动反思。
 
-### 第二阶段：可靠性增强
+### 第二阶段：Direct / Planned Router（已完成）
+
+1. 增加 `auto`、`direct`、`planned` API 模式；
+2. 增加确定性高置信度规则；
+3. 模糊请求使用模型 Router；
+4. 无效输出或低置信度结果降级到 Planned；
+5. 增加独立 Direct Agent 和更小的工具预算；
+6. Direct 与 Planned 共用工具执行节点；
+7. 等待确认的计划在 Router 之前恢复或取消；
+8. 增加 `route_selected` 流式事件和路由测试。
+
+### 第三阶段：可靠性增强
 
 1. 增加 Evaluator；
 2. 支持有限 replan；
@@ -473,7 +485,7 @@ planning 状态应随 LangGraph checkpoint 一起保存，至少包括：
 6. 扩展 planning trace；
 7. 基于结构化结果改进 Answer Composer。
 
-### 第三阶段：产品化能力
+### 第四阶段：产品化能力
 
 1. 前端展示计划和步骤进度；
 2. 支持用户取消任务；

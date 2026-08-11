@@ -28,6 +28,16 @@ class FakeGraph:
         self.last_payload = payload
         self.last_config = config
         yield (
+            "updates",
+            {
+                "router": {
+                    "execution_mode": "direct",
+                    "route_source": "rule",
+                    "route_reason": "测试直接路径",
+                }
+            },
+        )
+        yield (
             "messages",
             (AIMessageChunk(content="已根据"), {"langgraph_node": "compose_answer"}),
         )
@@ -87,7 +97,31 @@ def test_chat_without_memory_key_keeps_normal_behavior() -> None:
     messages = graph.last_payload["messages"]
     assert len(messages) == 1
     assert messages[0].content == "你好"
+    assert graph.last_payload["requested_mode"] == "auto"
     assert graph.last_config == {"configurable": {"thread_id": "thread-1"}}
+
+
+def test_chat_accepts_explicit_planning_mode() -> None:
+    client, graph, _, _ = make_client()
+
+    response = client.post(
+        "/chat",
+        json={"thread_id": "thread-planned", "message": "分析地址", "planning": "planned"},
+    )
+
+    assert response.status_code == 200
+    assert graph.last_payload["requested_mode"] == "planned"
+
+
+def test_chat_rejects_invalid_planning_mode() -> None:
+    client, _, _, _ = make_client()
+
+    response = client.post(
+        "/chat",
+        json={"thread_id": "thread-invalid", "message": "你好", "planning": "invalid"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_chat_stream_returns_status_deltas_and_done_event() -> None:
@@ -100,6 +134,12 @@ def test_chat_stream_returns_status_deltas_and_done_event() -> None:
     assert response.headers["content-type"].startswith("application/x-ndjson")
     events = [json.loads(line) for line in response.text.splitlines()]
     assert events[0] == {"type": "status", "content": "正在思考..."}
+    assert {
+        "type": "route_selected",
+        "mode": "direct",
+        "source": "rule",
+        "reason": "测试直接路径",
+    } in events
     assert "".join(
         event["content"] for event in events if event["type"] == "delta"
     ) == "已根据上下文完成回答。"

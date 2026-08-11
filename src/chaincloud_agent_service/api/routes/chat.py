@@ -6,7 +6,7 @@ import json
 import os
 import re
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from langchain_core.messages import AIMessageChunk, BaseMessage, HumanMessage
@@ -34,6 +34,10 @@ class ChatRequest(BaseModel):
         ..., min_length=1, description="会话线程 ID，对应 checkpoint 的 thread_id"
     )
     message: str = Field(..., min_length=1, description="用户本轮输入")
+    planning: Literal["auto", "direct", "planned"] = Field(
+        default="auto",
+        description="执行模式：自动判断、直接执行或先规划后执行",
+    )
     memory_key: str | None = Field(
         default=None,
         min_length=1,
@@ -268,7 +272,7 @@ async def chat(
 
     try:
         result = await graph.ainvoke(
-            {"messages": input_messages},
+            {"messages": input_messages, "requested_mode": body.planning},
             config=config,
         )
     except APIStatusError as exc:
@@ -325,7 +329,7 @@ async def chat_stream(
 
         try:
             async for mode, data in graph.astream(
-                {"messages": input_messages},
+                {"messages": input_messages, "requested_mode": body.planning},
                 config=config,
                 stream_mode=["messages", "updates"],
             ):
@@ -352,7 +356,22 @@ async def chat_stream(
                         if not isinstance(node_messages, list):
                             node_messages = [node_messages]
                         messages.extend(message for message in node_messages if message is not None)
-                    if node_name == "planner" and isinstance(update, dict):
+                    if node_name == "router" and isinstance(update, dict):
+                        yield _ndjson_event(
+                            "route_selected",
+                            mode=update.get("execution_mode", "planned"),
+                            source=update.get("route_source", "fallback"),
+                            reason=update.get("route_reason", ""),
+                        )
+                    elif node_name == "prepare_request" and isinstance(update, dict):
+                        if update.get("route_action") in {"resume", "cancel"}:
+                            yield _ndjson_event(
+                                "route_selected",
+                                mode="planned",
+                                source="resume",
+                                reason=update.get("route_reason", ""),
+                            )
+                    elif node_name == "planner" and isinstance(update, dict):
                         plan = update.get("plan")
                         if isinstance(plan, dict):
                             yield _ndjson_event(
@@ -381,7 +400,7 @@ async def chat_stream(
                             )
                     elif node_name == "tools":
                         yield _ndjson_event("status", content="工具执行完成，正在整理结果...")
-                    elif node_name == "executor":
+                    elif node_name in {"executor", "direct_agent"}:
                         yield _ndjson_event("status", content="正在分析执行结果...")
                     elif node_name == "budget_exceeded":
                         yield _ndjson_event(

@@ -13,6 +13,7 @@ from langgraph.prebuilt import ToolNode
 
 from chaincloud_agent_service.agent.answer_composer import acompose_final_answer
 from chaincloud_agent_service.agent.planning import Plan, StepResult, create_plan
+from chaincloud_agent_service.agent.routing import decide_route
 from chaincloud_agent_service.agent.schema_context import build_agent_system_prompt
 from chaincloud_agent_service.agent.state import AgentState
 from chaincloud_agent_service.config import Settings
@@ -21,6 +22,7 @@ from chaincloud_agent_service.tools.registry import get_tools
 
 MAX_TOOL_CALLS = 12
 MAX_STEP_TOOL_CALLS = 4
+MAX_DIRECT_TOOL_CALLS = 4
 
 
 def _latest_user_question(messages: list[Any]) -> str:
@@ -43,6 +45,19 @@ def _is_confirmation(text: str) -> bool:
         "confirm",
         "proceed",
         "yes",
+    }
+
+
+def _is_cancellation(text: str) -> bool:
+    normalized = text.strip().lower().rstrip("。.!！")
+    return normalized in {
+        "取消",
+        "取消执行",
+        "不用了",
+        "停止",
+        "cancel",
+        "stop",
+        "no",
     }
 
 
@@ -108,6 +123,8 @@ def _step_execution_prompt(state: AgentState) -> str:
 def _execution_summary(state: AgentState) -> str:
     return json.dumps(
         {
+            "execution_mode": state.get("execution_mode"),
+            "route_reason": state.get("route_reason"),
             "plan": state.get("plan"),
             "step_results": state.get("step_results", []),
             "status": state.get("status"),
@@ -134,23 +151,77 @@ def compile_agent_graph(
     executor_model = base_model.bind_tools(tools) if tools else base_model
     tool_node = ToolNode(tools) if tools else None
 
-    def planner_node(state: AgentState) -> dict[str, Any]:
+    def prepare_request_node(state: AgentState) -> dict[str, Any]:
         goal = _latest_user_question(list(state["messages"]))
         if (
             state.get("status") == "waiting_confirmation"
             and state.get("plan")
             and state.get("current_step_id")
-            and _is_confirmation(goal)
         ):
-            approved = list(state.get("approved_step_ids", []))
-            current_step_id = str(state["current_step_id"])
-            if current_step_id not in approved:
-                approved.append(current_step_id)
-            return {
-                "approved_step_ids": approved,
-                "status": "planning",
-                "failure_reason": None,
-            }
+            if _is_confirmation(goal):
+                approved = list(state.get("approved_step_ids", []))
+                current_step_id = str(state["current_step_id"])
+                if current_step_id not in approved:
+                    approved.append(current_step_id)
+                return {
+                    "route_action": "resume",
+                    "execution_mode": "planned",
+                    "route_reason": "恢复等待用户确认的计划",
+                    "route_confidence": 1.0,
+                    "route_source": "resume",
+                    "route_signals": ["confirmation_resume"],
+                    "approved_step_ids": approved,
+                    "status": "planning",
+                    "failure_reason": None,
+                }
+            if _is_cancellation(goal):
+                return {
+                    "route_action": "cancel",
+                    "execution_mode": "planned",
+                    "route_reason": "用户取消了等待确认的计划",
+                    "route_confidence": 1.0,
+                    "route_source": "resume",
+                    "route_signals": ["confirmation_cancelled"],
+                    "status": "failed",
+                    "failure_reason": "用户已取消执行",
+                }
+        return {"route_action": "route"}
+
+    def prepare_request_route(state: AgentState) -> str:
+        return state.get("route_action", "route")
+
+    def router_node(state: AgentState) -> dict[str, Any]:
+        messages = list(state["messages"])
+        decision = decide_route(
+            base_model,
+            _latest_user_question(messages),
+            tools,
+            requested_mode=state.get("requested_mode", "auto"),
+            conversation_context=_planning_context(messages),
+        )
+        return {
+            "execution_mode": decision.mode,
+            "route_reason": decision.reason,
+            "route_confidence": decision.confidence,
+            "route_source": decision.source,
+            "route_signals": decision.signals,
+            "plan": None,
+            "current_step_id": None,
+            "approved_step_ids": [],
+            "step_results": [],
+            "planner_attempts": 0,
+            "tool_call_count": 0,
+            "direct_tool_call_count": 0,
+            "step_tool_call_count": 0,
+            "status": "planning" if decision.mode == "planned" else "executing",
+            "failure_reason": None,
+        }
+
+    def router_route(state: AgentState) -> str:
+        return state.get("execution_mode", "planned")
+
+    def planner_node(state: AgentState) -> dict[str, Any]:
+        goal = _latest_user_question(list(state["messages"]))
         plan, attempts = create_plan(
             base_model,
             goal,
@@ -165,9 +236,48 @@ def compile_agent_graph(
             "step_message_start": len(state["messages"]),
             "planner_attempts": attempts,
             "tool_call_count": 0,
+            "direct_tool_call_count": 0,
             "step_tool_call_count": 0,
             "status": "planning",
             "failure_reason": None,
+        }
+
+    def direct_agent_node(state: AgentState) -> dict[str, list[Any]]:
+        msgs: list[Any] = list(state["messages"])
+        direct_prompt = (
+            "当前请求已被路由为直接执行模式。请直接解决用户当前请求。"
+            "需要数据时可以调用工具，但不要制定或展示任务计划。"
+            f"本轮剩余工具调用额度："
+            f"{MAX_DIRECT_TOOL_CALLS - state.get('direct_tool_call_count', 0)}。"
+        )
+        combined_prompt = "\n\n---\n\n".join(
+            part for part in (system_prompt, direct_prompt) if part
+        )
+        if msgs and isinstance(msgs[0], SystemMessage):
+            msgs[0] = SystemMessage(
+                content=f"{combined_prompt}\n\n---\n\n长期记忆背景：\n{msgs[0].content}"
+            )
+        elif combined_prompt:
+            msgs = [SystemMessage(content=combined_prompt), *msgs]
+        return {"messages": [executor_model.invoke(msgs)]}
+
+    def direct_agent_route(state: AgentState) -> str:
+        messages = list(state["messages"])
+        calls = _tool_calls(messages[-1]) if messages else []
+        if not calls:
+            return "complete_direct"
+        if not tools:
+            return "budget_exceeded"
+        if state.get("direct_tool_call_count", 0) + len(calls) > MAX_DIRECT_TOOL_CALLS:
+            return "budget_exceeded"
+        return "tools"
+
+    def complete_direct_node(state: AgentState) -> dict[str, Any]:
+        messages = list(state["messages"])
+        summary = _message_text(messages[-1]) if messages else ""
+        return {
+            "status": "completed" if summary else "failed",
+            "failure_reason": None if summary else "直接执行没有生成有效结果",
         }
 
     def select_step_node(state: AgentState) -> dict[str, Any]:
@@ -246,11 +356,22 @@ def compile_agent_graph(
         messages = list(state["messages"])
         count = len(_tool_calls(messages[-1])) if messages else 0
         result = tool_node.invoke(state)
-        return {
+        update: dict[str, Any] = {
             "messages": result.get("messages", []),
             "tool_call_count": state.get("tool_call_count", 0) + count,
-            "step_tool_call_count": state.get("step_tool_call_count", 0) + count,
         }
+        if state.get("execution_mode") == "direct":
+            update["direct_tool_call_count"] = (
+                state.get("direct_tool_call_count", 0) + count
+            )
+        else:
+            update["step_tool_call_count"] = (
+                state.get("step_tool_call_count", 0) + count
+            )
+        return update
+
+    def tools_route(state: AgentState) -> str:
+        return "direct" if state.get("execution_mode") == "direct" else "planned"
 
     def budget_exceeded_node(state: AgentState) -> dict[str, Any]:
         messages = list(state["messages"])
@@ -310,6 +431,10 @@ def compile_agent_graph(
         return {"messages": [response]}
 
     builder = StateGraph(AgentState)
+    builder.add_node("prepare_request", prepare_request_node)
+    builder.add_node("router", router_node)
+    builder.add_node("direct_agent", direct_agent_node)
+    builder.add_node("complete_direct", complete_direct_node)
     builder.add_node("planner", planner_node)
     builder.add_node("select_step", select_step_node)
     builder.add_node("executor", executor_node)
@@ -319,7 +444,27 @@ def compile_agent_graph(
     if tools:
         builder.add_node("tools", tools_node)
 
-    builder.add_edge(START, "planner")
+    builder.add_edge(START, "prepare_request")
+    builder.add_conditional_edges(
+        "prepare_request",
+        prepare_request_route,
+        {"route": "router", "resume": "select_step", "cancel": "compose_answer"},
+    )
+    builder.add_conditional_edges(
+        "router",
+        router_route,
+        {"direct": "direct_agent", "planned": "planner"},
+    )
+    builder.add_conditional_edges(
+        "direct_agent",
+        direct_agent_route,
+        {
+            "complete_direct": "complete_direct",
+            "budget_exceeded": "budget_exceeded",
+            **({"tools": "tools"} if tools else {}),
+        },
+    )
+    builder.add_edge("complete_direct", "compose_answer")
     builder.add_edge("planner", "select_step")
     builder.add_conditional_edges(
         "select_step",
@@ -334,7 +479,11 @@ def compile_agent_graph(
         executor_destinations["tools"] = "tools"
     builder.add_conditional_edges("executor", executor_route, executor_destinations)
     if tools:
-        builder.add_edge("tools", "executor")
+        builder.add_conditional_edges(
+            "tools",
+            tools_route,
+            {"direct": "direct_agent", "planned": "executor"},
+        )
     builder.add_edge("budget_exceeded", "compose_answer")
     builder.add_conditional_edges(
         "complete_step",
