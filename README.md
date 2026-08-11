@@ -41,9 +41,11 @@ flowchart TB
 |------|------|------|
 | 应用入口 | `main.py` | FastAPI 实例、`lifespan`：加载配置、创建 **checkpoint**、编译图、挂载路由；不含业务编排。 |
 | 配置 | `config.py` | 环境变量与 `.env` 加载；供 graph、工具、路由读取。 |
-| 编排 | `agent/graph.py` | **唯一编排入口**：Router 将请求分为 Direct 和 Planned；Direct 跳过计划直接回答/调用工具，Planned 生成结构化计划并逐步骤执行。两条路径共用工具节点、预算控制、checkpoint 和 Answer Composer。 |
+| 编排 | `agent/graph.py` | **唯一编排入口**：Router 将请求分为 Direct 和 Planned；Planned 的每一步经过 Evaluator，最终回答按风险进入 Reviewer。两条路径共用工具节点、预算控制、checkpoint 和 Answer Composer。 |
 | Router | `agent/routing/` | 三层路由：API `planning` 强制模式、确定性高置信度规则、模糊请求模型分类；分类失败或低置信度时保守进入 Planned。 |
 | Planning | `agent/planning/` | `Plan` / `PlanStep` / `StepResult` 数据模型、计划生成与依赖/工具引用校验；无效输出重试一次后降级为安全的单步骤计划。 |
+| Evaluator | `agent/evaluation/` | 按步骤成功标准审查 Planned 执行结果，支持 pass、retry、replan、partial 和 fail；重试与重规划次数有硬上限。 |
+| Reviewer | `agent/review/` | 审查最终答案的证据一致性和事实边界；Planned 默认审查，Direct 仅在高风险主题、多工具或复杂信号下审查。 |
 | Agent 状态 | `agent/state.py` | 保存 messages、计划、当前步骤、步骤结果、确认状态和工具调用计数，并随 checkpoint 持久化。 |
 | 系统提示加载 | `agent/schema_context.py` | 读取 schema / 回答风格 / 合约解码流程 Markdown，`build_agent_system_prompt` 合并为一条 **SystemMessage**（不写入 checkpoint）。 |
 | 工具注册 | `tools/registry.py` | 汇总 `get_tools(settings)`，供 graph `bind_tools`。 |

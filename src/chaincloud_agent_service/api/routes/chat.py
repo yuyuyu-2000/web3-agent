@@ -324,6 +324,7 @@ async def chat_stream(
     async def events() -> AsyncIterator[bytes]:
         messages: list[Any] = list(input_messages)
         streamed_reply = ""
+        buffer_for_review = False
         stripper = _IncrementalReasoningStripper()
         yield _ndjson_event("status", content="正在思考...")
 
@@ -339,6 +340,8 @@ async def chat_stream(
                         metadata.get("langgraph_node") != "compose_answer"
                         or not isinstance(chunk, AIMessageChunk)
                     ):
+                        continue
+                    if buffer_for_review:
                         continue
                     delta = stripper.feed(
                         _message_content_to_text(getattr(chunk, "content", ""))
@@ -379,6 +382,14 @@ async def chat_stream(
                                 goal=plan.get("goal", ""),
                                 steps=plan.get("steps", []),
                             )
+                    elif node_name == "replan" and isinstance(update, dict):
+                        plan = update.get("plan")
+                        if isinstance(plan, dict):
+                            yield _ndjson_event(
+                                "plan_updated",
+                                goal=plan.get("goal", ""),
+                                steps=plan.get("steps", []),
+                            )
                     elif node_name == "select_step" and isinstance(update, dict):
                         step_id = update.get("current_step_id")
                         if step_id and update.get("status") == "executing":
@@ -389,15 +400,31 @@ async def chat_stream(
                                 step_id=step_id,
                                 reason=update.get("failure_reason", ""),
                             )
-                    elif node_name == "complete_step" and isinstance(update, dict):
-                        results = update.get("step_results", [])
-                        if results:
-                            latest_result = results[-1]
+                    elif node_name == "evaluator" and isinstance(update, dict):
+                        action = update.get("evaluation_action")
+                        yield _ndjson_event(
+                            "step_evaluated",
+                            step_id=update.get("current_step_id"),
+                            action=action,
+                        )
+                        if action in {"pass", "partial", "fail"}:
                             yield _ndjson_event(
                                 "step_completed",
-                                step_id=latest_result.get("step_id"),
-                                status=latest_result.get("status"),
+                                step_id=update.get("current_step_id"),
+                                status=("success" if action == "pass" else action),
                             )
+                    elif node_name == "review_gate" and isinstance(update, dict):
+                        buffer_for_review = bool(update.get("review_required"))
+                        yield _ndjson_event(
+                            "review_decided",
+                            required=buffer_for_review,
+                            reason=update.get("review_reason", ""),
+                        )
+                    elif node_name == "reviewer" and isinstance(update, dict):
+                        yield _ndjson_event(
+                            "answer_reviewed",
+                            action=update.get("review_action"),
+                        )
                     elif node_name == "tools":
                         yield _ndjson_event("status", content="工具执行完成，正在整理结果...")
                     elif node_name in {"executor", "direct_agent"}:
@@ -417,6 +444,9 @@ async def chat_stream(
                 _message_content_to_text(getattr(last, "content", "") if last else "")
             )
             reply = _append_chart_urls(reply or streamed_reply, _extract_chart_urls(messages))
+            if buffer_for_review and reply:
+                streamed_reply = reply
+                yield _ndjson_event("delta", content=reply)
             payload: dict[str, Any] = {"reply": reply}
             if body.debug:
                 payload["trace"] = [

@@ -147,6 +147,58 @@ def test_chat_stream_returns_status_deltas_and_done_event() -> None:
     assert graph.last_config == {"configurable": {"thread_id": "thread-stream"}}
 
 
+def test_chat_stream_does_not_emit_unreviewed_draft() -> None:
+    class ReviewedFakeGraph:
+        async def astream(self, payload, config=None, stream_mode=None):  # type: ignore[no-untyped-def]
+            yield (
+                "updates",
+                {
+                    "review_gate": {
+                        "review_required": True,
+                        "review_reason": "高风险 Direct 回答",
+                    }
+                },
+            )
+            yield (
+                "messages",
+                (AIMessageChunk(content="未经审查的草稿"), {"langgraph_node": "compose_answer"}),
+            )
+            yield (
+                "updates",
+                {"compose_answer": {"messages": [AIMessage(content="未经审查的草稿")]}},
+            )
+            yield (
+                "updates",
+                {"reviewer": {"review_action": "revise"}},
+            )
+            yield (
+                "messages",
+                (AIMessageChunk(content="审查后的答案"), {"langgraph_node": "compose_answer"}),
+            )
+            yield (
+                "updates",
+                {"compose_answer": {"messages": [AIMessage(content="审查后的答案")]}},
+            )
+            yield (
+                "updates",
+                {"reviewer": {"review_action": "approve"}},
+            )
+
+    client, _, _, _ = make_client()
+    client.app.state.graph = ReviewedFakeGraph()
+
+    response = client.post(
+        "/chat/stream",
+        json={"thread_id": "reviewed-stream", "message": "分析清算风险"},
+    )
+
+    events = [json.loads(line) for line in response.text.splitlines()]
+    deltas = [event["content"] for event in events if event["type"] == "delta"]
+    assert deltas == ["审查后的答案"]
+    assert "未经审查的草稿" not in response.text
+    assert events[-1] == {"type": "done", "reply": "审查后的答案"}
+
+
 def test_chat_with_memory_key_injects_owned_system_message() -> None:
     client, graph, memory_service, auth_service = make_client()
     headers, user_id, username = auth_header(auth_service)

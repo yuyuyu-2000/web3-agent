@@ -23,11 +23,23 @@ class AgentState(TypedDict):
     current_step_id: NotRequired[str | None]
     approved_step_ids: NotRequired[list[str]]
     step_results: NotRequired[list[dict[str, Any]]]
+    candidate_step_result: NotRequired[dict[str, Any] | None]
     step_message_start: NotRequired[int]
     planner_attempts: NotRequired[int]
+    replanning_count: NotRequired[int]
     tool_call_count: NotRequired[int]
     direct_tool_call_count: NotRequired[int]
     step_tool_call_count: NotRequired[int]
+    step_retry_count: NotRequired[int]
+    evaluation_action: NotRequired[
+        Literal["pass", "retry", "replan", "partial", "fail"] | None
+    ]
+    evaluation_feedback: NotRequired[str | None]
+    review_required: NotRequired[bool]
+    review_reason: NotRequired[str | None]
+    review_action: NotRequired[Literal["approve", "revise"] | None]
+    review_feedback: NotRequired[str | None]
+    review_attempts: NotRequired[int]
     status: NotRequired[
         Literal[
             "planning",

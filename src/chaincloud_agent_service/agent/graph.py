@@ -12,7 +12,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from chaincloud_agent_service.agent.answer_composer import acompose_final_answer
+from chaincloud_agent_service.agent.evaluation import evaluate_step
 from chaincloud_agent_service.agent.planning import Plan, StepResult, create_plan
+from chaincloud_agent_service.agent.review import direct_requires_review, review_answer
 from chaincloud_agent_service.agent.routing import decide_route
 from chaincloud_agent_service.agent.schema_context import build_agent_system_prompt
 from chaincloud_agent_service.agent.state import AgentState
@@ -23,6 +25,9 @@ from chaincloud_agent_service.tools.registry import get_tools
 MAX_TOOL_CALLS = 12
 MAX_STEP_TOOL_CALLS = 4
 MAX_DIRECT_TOOL_CALLS = 4
+MAX_STEP_RETRIES = 2
+MAX_REPLANS = 1
+MAX_REVIEW_ATTEMPTS = 2
 
 
 def _latest_user_question(messages: list[Any]) -> str:
@@ -209,10 +214,20 @@ def compile_agent_graph(
             "current_step_id": None,
             "approved_step_ids": [],
             "step_results": [],
+            "candidate_step_result": None,
             "planner_attempts": 0,
+            "replanning_count": 0,
             "tool_call_count": 0,
             "direct_tool_call_count": 0,
             "step_tool_call_count": 0,
+            "step_retry_count": 0,
+            "evaluation_action": None,
+            "evaluation_feedback": None,
+            "review_required": False,
+            "review_reason": None,
+            "review_action": None,
+            "review_feedback": None,
+            "review_attempts": 0,
             "status": "planning" if decision.mode == "planned" else "executing",
             "failure_reason": None,
         }
@@ -233,11 +248,15 @@ def compile_agent_graph(
             "current_step_id": None,
             "approved_step_ids": [],
             "step_results": [],
+            "candidate_step_result": None,
             "step_message_start": len(state["messages"]),
             "planner_attempts": attempts,
             "tool_call_count": 0,
             "direct_tool_call_count": 0,
             "step_tool_call_count": 0,
+            "step_retry_count": 0,
+            "evaluation_action": None,
+            "evaluation_feedback": None,
             "status": "planning",
             "failure_reason": None,
         }
@@ -304,6 +323,9 @@ def compile_agent_graph(
             return {
                 "current_step_id": step.id,
                 "step_tool_call_count": 0,
+                "step_retry_count": 0,
+                "evaluation_action": None,
+                "evaluation_feedback": None,
                 "step_message_start": len(state["messages"]),
                 "status": "executing",
             }
@@ -327,6 +349,11 @@ def compile_agent_graph(
     def executor_node(state: AgentState) -> dict[str, list[Any]]:
         msgs: list[Any] = list(state["messages"])
         execution_prompt = _step_execution_prompt(state)
+        if state.get("evaluation_feedback"):
+            execution_prompt += (
+                "\n上一次 Evaluator 反馈："
+                f"{state['evaluation_feedback']}\n请针对反馈修正本次执行结果。"
+            )
         combined_prompt = "\n\n---\n\n".join(
             part for part in (system_prompt, execution_prompt) if part
         )
@@ -413,22 +440,161 @@ def compile_agent_graph(
             ],
             error=None if summary else "empty executor response",
         )
+        return {"candidate_step_result": result.model_dump()}
+
+    def evaluator_node(state: AgentState) -> dict[str, Any]:
+        plan = _plan_from_state(state)
+        current_step_id = state.get("current_step_id")
+        step = next(item for item in plan.steps if item.id == current_step_id)
+        candidate = StepResult.model_validate(state.get("candidate_step_result"))
+        decision = evaluate_step(base_model, step, candidate)
+        retry_count = state.get("step_retry_count", 0)
+        replan_count = state.get("replanning_count", 0)
+        action = decision.action
+        if action == "retry" and retry_count >= MAX_STEP_RETRIES:
+            action = "partial"
+            decision.feedback = "步骤已达到最大重试次数"
+        if action == "replan" and replan_count >= MAX_REPLANS:
+            action = "partial"
+            decision.feedback = "任务已达到最大重新规划次数"
+
+        update: dict[str, Any] = {
+            "current_step_id": current_step_id,
+            "evaluation_action": action,
+            "evaluation_feedback": decision.feedback or decision.reason,
+        }
+        if action == "pass":
+            accepted = candidate.model_copy(update={"status": "success"})
+            update.update(
+                step_results=[*state.get("step_results", []), accepted.model_dump()],
+                candidate_step_result=None,
+                status="executing",
+                failure_reason=None,
+            )
+        elif action == "retry":
+            update.update(
+                step_retry_count=retry_count + 1,
+                candidate_step_result=None,
+                status="executing",
+            )
+        elif action == "replan":
+            update.update(
+                replanning_count=replan_count + 1,
+                candidate_step_result=None,
+                status="planning",
+            )
+        else:
+            result_status = "partial" if action == "partial" else "failed"
+            accepted = candidate.model_copy(update={"status": result_status})
+            update.update(
+                step_results=[*state.get("step_results", []), accepted.model_dump()],
+                candidate_step_result=None,
+                status="partial" if action == "partial" else "failed",
+                failure_reason=decision.reason,
+            )
+        return update
+
+    def evaluator_route(state: AgentState) -> str:
+        action = state.get("evaluation_action")
+        if action == "pass":
+            return "next"
+        if action == "retry":
+            return "retry"
+        if action == "replan":
+            return "replan"
+        return "finish"
+
+    def replan_node(state: AgentState) -> dict[str, Any]:
+        old_plan = _plan_from_state(state)
+        context = json.dumps(
+            {
+                "completed_results": state.get("step_results", []),
+                "evaluator_feedback": state.get("evaluation_feedback"),
+                "instruction": "只规划尚未完成的剩余工作，不要重复已完成目标",
+            },
+            ensure_ascii=False,
+        )
+        plan, attempts = create_plan(
+            base_model,
+            old_plan.goal,
+            tools,
+            conversation_context=context,
+        )
         return {
-            "step_results": [*state.get("step_results", []), result.model_dump()],
-            "status": "executing" if summary else "partial",
-            "failure_reason": None if summary else "当前步骤没有生成有效结果",
+            "plan": plan.model_dump(),
+            "current_step_id": None,
+            "step_results": [],
+            "candidate_step_result": None,
+            "planner_attempts": state.get("planner_attempts", 0) + attempts,
+            "step_retry_count": 0,
+            "evaluation_action": None,
+            "status": "planning",
+            "failure_reason": None,
         }
 
-    def after_step_route(state: AgentState) -> str:
-        return "next" if state.get("status") == "executing" else "compose"
+    def review_gate_node(state: AgentState) -> dict[str, Any]:
+        status = state.get("status")
+        if status in {"waiting_confirmation"} or state.get("failure_reason") == "用户已取消执行":
+            required, reason = False, "确认或取消提示不需要最终答案审查"
+        elif state.get("execution_mode") == "planned":
+            required, reason = True, "Planned 结果需要证据和完整性审查"
+        else:
+            required, reason = direct_requires_review(
+                _latest_user_question(list(state["messages"])),
+                state.get("route_signals", []),
+                state.get("direct_tool_call_count", 0),
+            )
+        return {
+            "review_required": required,
+            "review_reason": reason,
+            "review_action": None,
+            "review_feedback": None,
+            "review_attempts": 0,
+        }
 
     async def compose_answer_node(state: AgentState) -> dict[str, list[Any]]:
         messages = list(state["messages"])
         messages.append(
             AIMessage(content=f"结构化任务执行摘要：\n{_execution_summary(state)}")
         )
+        if state.get("review_feedback"):
+            messages.append(
+                AIMessage(
+                    content=(
+                        "Reviewer 要求修订上一版回答：\n"
+                        f"{state['review_feedback']}\n"
+                        "请在不新增无依据事实的前提下重新生成最终回答。"
+                    )
+                )
+            )
         response = await acompose_final_answer(base_model, messages)
         return {"messages": [response]}
+
+    def after_compose_route(state: AgentState) -> str:
+        return "review" if state.get("review_required") else "end"
+
+    def reviewer_node(state: AgentState) -> dict[str, Any]:
+        messages = list(state["messages"])
+        answer = _message_text(messages[-1]) if messages else ""
+        decision = review_answer(
+            base_model,
+            _latest_user_question(messages),
+            answer,
+            _execution_summary(state),
+        )
+        return {
+            "review_action": decision.action,
+            "review_feedback": decision.feedback or decision.reason,
+            "review_attempts": state.get("review_attempts", 0) + 1,
+        }
+
+    def reviewer_route(state: AgentState) -> str:
+        if (
+            state.get("review_action") == "revise"
+            and state.get("review_attempts", 0) < MAX_REVIEW_ATTEMPTS
+        ):
+            return "revise"
+        return "end"
 
     builder = StateGraph(AgentState)
     builder.add_node("prepare_request", prepare_request_node)
@@ -439,8 +605,12 @@ def compile_agent_graph(
     builder.add_node("select_step", select_step_node)
     builder.add_node("executor", executor_node)
     builder.add_node("complete_step", complete_step_node)
+    builder.add_node("evaluator", evaluator_node)
+    builder.add_node("replan", replan_node)
     builder.add_node("budget_exceeded", budget_exceeded_node)
+    builder.add_node("review_gate", review_gate_node)
     builder.add_node("compose_answer", compose_answer_node)
+    builder.add_node("reviewer", reviewer_node)
     if tools:
         builder.add_node("tools", tools_node)
 
@@ -448,7 +618,7 @@ def compile_agent_graph(
     builder.add_conditional_edges(
         "prepare_request",
         prepare_request_route,
-        {"route": "router", "resume": "select_step", "cancel": "compose_answer"},
+        {"route": "router", "resume": "select_step", "cancel": "review_gate"},
     )
     builder.add_conditional_edges(
         "router",
@@ -464,12 +634,12 @@ def compile_agent_graph(
             **({"tools": "tools"} if tools else {}),
         },
     )
-    builder.add_edge("complete_direct", "compose_answer")
+    builder.add_edge("complete_direct", "review_gate")
     builder.add_edge("planner", "select_step")
     builder.add_conditional_edges(
         "select_step",
         select_step_route,
-        {"execute": "executor", "compose": "compose_answer"},
+        {"execute": "executor", "compose": "review_gate"},
     )
     executor_destinations = {
         "complete_step": "complete_step",
@@ -484,11 +654,28 @@ def compile_agent_graph(
             tools_route,
             {"direct": "direct_agent", "planned": "executor"},
         )
-    builder.add_edge("budget_exceeded", "compose_answer")
+    builder.add_edge("budget_exceeded", "review_gate")
+    builder.add_edge("complete_step", "evaluator")
     builder.add_conditional_edges(
-        "complete_step",
-        after_step_route,
-        {"next": "select_step", "compose": "compose_answer"},
+        "evaluator",
+        evaluator_route,
+        {
+            "next": "select_step",
+            "retry": "executor",
+            "replan": "replan",
+            "finish": "review_gate",
+        },
     )
-    builder.add_edge("compose_answer", END)
+    builder.add_edge("replan", "select_step")
+    builder.add_edge("review_gate", "compose_answer")
+    builder.add_conditional_edges(
+        "compose_answer",
+        after_compose_route,
+        {"review": "reviewer", "end": END},
+    )
+    builder.add_conditional_edges(
+        "reviewer",
+        reviewer_route,
+        {"revise": "compose_answer", "end": END},
+    )
     return builder.compile(checkpointer=checkpointer)

@@ -63,8 +63,30 @@ agent → tools → agent → compose_answer
 ```
 
 当前版本包含 Direct/Planned 分流、结构化计划、依赖校验、单步执行、工具调用
-预算、checkpoint 状态、副作用步骤确认和流式进度事件。暂不包含模型驱动的
-独立 Evaluator、动态 Replan、并行步骤和 Direct 自动升级 Planned。
+预算、checkpoint 状态、副作用步骤确认、步骤 Evaluator、条件 Reviewer 和流式
+进度事件。暂不包含并行步骤和 Direct 自动升级 Planned。
+
+质量控制链路为：
+
+```text
+Planned:
+Planner → Executor ↔ Tools → Evaluator
+                    ↑          ├─ pass → 下一步
+                    └─ retry ←─┤
+                               ├─ replan → Planner
+                               └─ partial/fail → Answer Composer
+                                                      ↓
+                                                   Reviewer
+                                           approve ─┤├─ revise → Composer
+
+Direct:
+Direct Agent ↔ Tools → Review Gate
+                         ├─ 简单低风险 → Answer Composer → END
+                         └─ 高风险/多工具 → Answer Composer → Reviewer
+```
+
+为了避免流式接口提前发送未经审查的草稿，需要 Reviewer 的回答会先缓冲，审查
+通过或完成有限修订后再发送；无需 Reviewer 的简单 Direct 回答继续原生流式输出。
 
 ```text
                          ┌── simple ──→ Agent/Tools ─────────┐
@@ -475,15 +497,17 @@ planning 状态应随 LangGraph checkpoint 一起保存，至少包括：
 7. 等待确认的计划在 Router 之前恢复或取消；
 8. 增加 `route_selected` 流式事件和路由测试。
 
-### 第三阶段：可靠性增强
+### 第三阶段：可靠性增强（Evaluator 与 Reviewer 已完成）
 
 1. 增加 Evaluator；
-2. 支持有限 replan；
+2. 支持有限 retry 和 replan；
 3. 对工具错误进行分类；
 4. 增加副作用工具确认机制；
 5. 完善 checkpoint 中断恢复；
 6. 扩展 planning trace；
 7. 基于结构化结果改进 Answer Composer。
+8. 增加条件 Reviewer：Planned 默认审查，Direct 按风险和复杂度决定；
+9. Reviewer 最多修订两轮，模型不可用时保留 Composer 输出。
 
 ### 第四阶段：产品化能力
 
