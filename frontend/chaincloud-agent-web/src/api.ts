@@ -6,6 +6,7 @@ import type {
   LoginRequest,
   MemoryListResponse,
   MemoryRecord,
+  PermissionRequest,
   RegisterRequest,
   ToolListResponse,
   UserResponse
@@ -99,6 +100,27 @@ export function sendChat(body: ChatRequest, authToken?: string): Promise<ChatRes
     {
       method: "POST",
       body: JSON.stringify(body)
+    },
+    authToken ? { authToken, useStaticToken: false } : {}
+  );
+}
+
+export function decidePermission(
+  threadId: string,
+  permission: PermissionRequest,
+  decision: "approve" | "cancel",
+  authToken?: string
+): Promise<ChatResponse> {
+  return requestJson<ChatResponse>(
+    "/chat/permission",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        thread_id: threadId,
+        step_id: permission.step_id,
+        tool_name: permission.tool_name,
+        decision
+      })
     },
     authToken ? { authToken, useStaticToken: false } : {}
   );

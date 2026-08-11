@@ -14,6 +14,7 @@ from langgraph.prebuilt import ToolNode
 from chaincloud_agent_service.agent.answer_composer import acompose_final_answer
 from chaincloud_agent_service.agent.evaluation import evaluate_step
 from chaincloud_agent_service.agent.planning import Plan, StepResult, create_plan
+from chaincloud_agent_service.agent.permission import evaluate_step_permission
 from chaincloud_agent_service.agent.review import direct_requires_review, review_answer
 from chaincloud_agent_service.agent.routing import decide_route
 from chaincloud_agent_service.agent.schema_context import build_agent_system_prompt
@@ -176,6 +177,13 @@ def compile_agent_graph(
                     "route_source": "resume",
                     "route_signals": ["confirmation_resume"],
                     "approved_step_ids": approved,
+                    "approved_permission_keys": [
+                        *state.get("approved_permission_keys", []),
+                        *(
+                            [f"{state['pending_permission']['step_id']}:{state['pending_permission']['tool_name']}"]
+                            if state.get("pending_permission") else []
+                        ),
+                    ],
                     "status": "planning",
                     "failure_reason": None,
                 }
@@ -213,6 +221,9 @@ def compile_agent_graph(
             "plan": None,
             "current_step_id": None,
             "approved_step_ids": [],
+            "approved_permission_keys": [],
+            "pending_permission": None,
+            "permission_action": None,
             "step_results": [],
             "candidate_step_result": None,
             "planner_attempts": 0,
@@ -247,6 +258,9 @@ def compile_agent_graph(
             "plan": plan.model_dump(),
             "current_step_id": None,
             "approved_step_ids": [],
+            "approved_permission_keys": [],
+            "pending_permission": None,
+            "permission_action": None,
             "step_results": [],
             "candidate_step_result": None,
             "step_message_start": len(state["messages"]),
@@ -311,15 +325,6 @@ def compile_agent_graph(
             )
             if not dependencies_satisfied:
                 continue
-            if (
-                step.requires_confirmation
-                and step.id not in state.get("approved_step_ids", [])
-            ):
-                return {
-                    "current_step_id": step.id,
-                    "status": "waiting_confirmation",
-                    "failure_reason": f"步骤 {step.id} 需要用户确认后才能执行",
-                }
             return {
                 "current_step_id": step.id,
                 "step_tool_call_count": 0,
@@ -344,7 +349,37 @@ def compile_agent_graph(
         }
 
     def select_step_route(state: AgentState) -> str:
-        return "execute" if state.get("status") == "executing" else "compose"
+        return "permission" if state.get("status") == "executing" else "compose"
+
+    def permission_gate_node(state: AgentState) -> dict[str, Any]:
+        plan = _plan_from_state(state)
+        current_step_id = state.get("current_step_id")
+        step = next(item for item in plan.steps if item.id == current_step_id)
+        decision = evaluate_step_permission(
+            step, state.get("approved_permission_keys", [])
+        )
+        update: dict[str, Any] = {
+            "permission_action": decision.action,
+            "pending_permission": None,
+        }
+        if decision.action == "NEED_CONFIRM":
+            update.update(
+                status="waiting_confirmation",
+                failure_reason=decision.reason,
+                pending_permission=decision.model_dump(),
+            )
+        elif decision.action == "DENY":
+            update.update(
+                status="permission_denied",
+                failure_reason=decision.reason,
+                pending_permission=decision.model_dump(),
+            )
+        else:
+            update.update(status="executing", failure_reason=None)
+        return update
+
+    def permission_gate_route(state: AgentState) -> str:
+        return "execute" if state.get("permission_action") == "ALLOW" else "finish"
 
     def executor_node(state: AgentState) -> dict[str, list[Any]]:
         msgs: list[Any] = list(state["messages"])
@@ -527,6 +562,9 @@ def compile_agent_graph(
             "candidate_step_result": None,
             "planner_attempts": state.get("planner_attempts", 0) + attempts,
             "step_retry_count": 0,
+            "approved_permission_keys": [],
+            "pending_permission": None,
+            "permission_action": None,
             "evaluation_action": None,
             "status": "planning",
             "failure_reason": None,
@@ -603,6 +641,7 @@ def compile_agent_graph(
     builder.add_node("complete_direct", complete_direct_node)
     builder.add_node("planner", planner_node)
     builder.add_node("select_step", select_step_node)
+    builder.add_node("permission_gate", permission_gate_node)
     builder.add_node("executor", executor_node)
     builder.add_node("complete_step", complete_step_node)
     builder.add_node("evaluator", evaluator_node)
@@ -639,7 +678,12 @@ def compile_agent_graph(
     builder.add_conditional_edges(
         "select_step",
         select_step_route,
-        {"execute": "executor", "compose": "review_gate"},
+        {"permission": "permission_gate", "compose": "review_gate"},
+    )
+    builder.add_conditional_edges(
+        "permission_gate",
+        permission_gate_route,
+        {"execute": "executor", "finish": END},
     )
     executor_destinations = {
         "complete_step": "complete_step",
@@ -661,7 +705,7 @@ def compile_agent_graph(
         evaluator_route,
         {
             "next": "select_step",
-            "retry": "executor",
+            "retry": "permission_gate",
             "replan": "replan",
             "finish": "review_gate",
         },

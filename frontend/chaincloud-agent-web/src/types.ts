@@ -26,13 +26,24 @@ export interface ChatRequest {
 export interface ChatResponse {
   reply: string;
   trace?: ChatTraceEvent[];
+  permission_required?: PermissionRequest;
 }
 
 export type ChatStreamEvent =
   | { type: "status"; content: string }
   | { type: "delta"; content: string }
   | { type: "done"; reply: string; trace?: ChatTraceEvent[] }
+  | ({ type: "permission_required" } & PermissionRequest)
   | { type: "error"; message: string };
+
+export interface PermissionRequest {
+  step_id: string;
+  tool_name: string;
+  risk_level: "none" | "low" | "medium" | "high" | "critical";
+  reason: string;
+  operation_summary: string;
+  estimated_impact: string;
+}
 
 export interface MemoryRecord {
   memory_key: string;

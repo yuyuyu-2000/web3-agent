@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   API_BASE_URL,
+  decidePermission,
   getCurrentUser,
   getMemories,
   getTools,
@@ -13,6 +14,7 @@ import type {
   AuthTokenResponse,
   ChatMessage,
   MemoryRecord,
+  PermissionRequest,
   ToolInfo,
   UserResponse
 } from "./types";
@@ -495,6 +497,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [sideLoading, setSideLoading] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
+  const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const AUTO_SUMMARIZE_THRESHOLD = 8;
 
@@ -599,7 +602,7 @@ export default function App() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = input.trim();
-    if (!trimmed || loading) return;
+    if (!trimmed || loading || pendingPermission) return;
 
     const userMessage: ChatMessage = {
       id: newId("user"),
@@ -627,7 +630,10 @@ export default function App() {
         },
         async (event) => {
           if (event.type === "error") throw new Error(event.message);
-          if (event.type === "status") {
+          if (event.type === "permission_required") {
+            setPendingPermission(event);
+            setMessages((prev) => prev.filter((item) => item.id !== assistantId));
+          } else if (event.type === "status") {
             setMessages((prev) => prev.map((message) =>
               message.id === assistantId && message.content.endsWith("...")
                 ? { ...message, content: event.content }
@@ -669,6 +675,32 @@ export default function App() {
       setMessages((prev) => [
         ...prev.filter((item) => item.id !== assistantId),
         { id: newId("error"), role: "error", content: message }
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handlePermissionDecision(decision: "approve" | "cancel") {
+    if (!pendingPermission || loading) return;
+    const permission = pendingPermission;
+    setLoading(true);
+    try {
+      const response = await decidePermission(threadId, permission, decision, authToken);
+      setPendingPermission(response.permission_required || null);
+      setMessages((prev) => [
+        ...prev,
+        ...(decision === "approve" && response.reply
+          ? buildAssistantMessages(response.reply, response.trace)
+          : decision === "cancel"
+            ? [{ id: newId("system"), role: "system" as const, content: response.reply }]
+            : [])
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setMessages((prev) => [
+        ...prev,
+        { id: newId("error"), role: "error", content: `审批失败：${message}` }
       ]);
     } finally {
       setLoading(false);
@@ -910,6 +942,30 @@ export default function App() {
               </div>
             </article>
           ))}
+          {pendingPermission ? (
+            <article className="permission-card">
+              <div className="permission-card-header">
+                <strong>操作需要你的确认</strong>
+                <span className={`risk-badge risk-${pendingPermission.risk_level}`}>
+                  {pendingPermission.risk_level.toUpperCase()}
+                </span>
+              </div>
+              <dl>
+                <dt>为什么需要确认</dt>
+                <dd>{pendingPermission.reason}</dd>
+                <dt>具体要执行什么</dt>
+                <dd>{pendingPermission.operation_summary}</dd>
+                <dt>工具</dt>
+                <dd>{pendingPermission.tool_name}</dd>
+                <dt>预计影响</dt>
+                <dd>{pendingPermission.estimated_impact}</dd>
+              </dl>
+              <div className="permission-actions">
+                <button type="button" className="primary" disabled={loading} onClick={() => void handlePermissionDecision("approve")}>确认执行</button>
+                <button type="button" disabled={loading} onClick={() => void handlePermissionDecision("cancel")}>取消</button>
+              </div>
+            </article>
+          ) : null}
           <div ref={bottomRef} />
         </div>
 
@@ -925,7 +981,7 @@ export default function App() {
               }
             }}
           />
-          <button className="primary" disabled={loading || !input.trim()}>
+          <button className="primary" disabled={loading || !input.trim() || Boolean(pendingPermission)}>
             {loading ? "发送中..." : "发送"}
           </button>
         </form>

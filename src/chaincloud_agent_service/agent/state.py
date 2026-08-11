@@ -22,6 +22,9 @@ class AgentState(TypedDict):
     plan: NotRequired[dict[str, Any] | None]
     current_step_id: NotRequired[str | None]
     approved_step_ids: NotRequired[list[str]]
+    approved_permission_keys: NotRequired[list[str]]
+    pending_permission: NotRequired[dict[str, Any] | None]
+    permission_action: NotRequired[Literal["ALLOW", "NEED_CONFIRM", "DENY"] | None]
     step_results: NotRequired[list[dict[str, Any]]]
     candidate_step_result: NotRequired[dict[str, Any] | None]
     step_message_start: NotRequired[int]
@@ -48,6 +51,7 @@ class AgentState(TypedDict):
             "partial",
             "failed",
             "waiting_confirmation",
+            "permission_denied",
         ]
     ]
     failure_reason: NotRequired[str | None]

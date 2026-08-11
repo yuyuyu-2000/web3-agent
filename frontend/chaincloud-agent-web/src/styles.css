@@ -870,3 +870,26 @@ code {
 .message.user .markdown-code-block {
   background: rgba(15, 23, 42, 0.38);
 }
+.permission-card {
+  align-self: center;
+  width: min(680px, calc(100% - 32px));
+  padding: 18px;
+  border: 1px solid #f0b44d;
+  border-radius: 14px;
+  background: #fffaf0;
+  color: #372a14;
+}
+
+.permission-card-header, .permission-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.permission-card dl { margin: 14px 0; }
+.permission-card dt { margin-top: 10px; font-weight: 700; }
+.permission-card dd { margin: 3px 0 0; }
+.risk-badge { padding: 3px 8px; border-radius: 999px; background: #f0b44d; font-size: 12px; }
+.risk-high, .risk-critical { background: #d9485f; color: white; }
+.permission-actions { justify-content: flex-end; }

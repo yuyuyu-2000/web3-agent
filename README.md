@@ -44,6 +44,7 @@ flowchart TB
 | 编排 | `agent/graph.py` | **唯一编排入口**：Router 将请求分为 Direct 和 Planned；Planned 的每一步经过 Evaluator，最终回答按风险进入 Reviewer。两条路径共用工具节点、预算控制、checkpoint 和 Answer Composer。 |
 | Router | `agent/routing/` | 三层路由：API `planning` 强制模式、确定性高置信度规则、模糊请求模型分类；分类失败或低置信度时保守进入 Planned。 |
 | Planning | `agent/planning/` | `Plan` / `PlanStep` / `StepResult` 数据模型、计划生成与依赖/工具引用校验；无效输出重试一次后降级为安全的单步骤计划。 |
+| Permission Gate | `agent/permission.py` | 在 Planned 步骤执行前以确定性代码规则区分只读、副作用和明显越权操作；审批精确绑定 step/tool。 |
 | Evaluator | `agent/evaluation/` | 按步骤成功标准审查 Planned 执行结果，支持 pass、retry、replan、partial 和 fail；重试与重规划次数有硬上限。 |
 | Reviewer | `agent/review/` | 审查最终答案的证据一致性和事实边界；Planned 默认审查，Direct 仅在高风险主题、多工具或复杂信号下审查。 |
 | Agent 状态 | `agent/state.py` | 保存 messages、计划、当前步骤、步骤结果、确认状态和工具调用计数，并随 checkpoint 持久化。 |

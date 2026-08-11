@@ -57,6 +57,14 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     trace: list[ChatTraceEvent] | None = None
+    permission_required: dict[str, Any] | None = None
+
+
+class PermissionApprovalRequest(BaseModel):
+    thread_id: str = Field(..., min_length=1)
+    step_id: str = Field(..., min_length=1)
+    tool_name: str = Field(..., min_length=1)
+    decision: Literal["approve", "cancel"]
 
 
 def _ndjson_event(event_type: str, **payload: Any) -> bytes:
@@ -309,6 +317,72 @@ async def chat(
     return ChatResponse(reply=text)
 
 
+@router.post(
+    "/chat/permission",
+    response_model=ChatResponse,
+    response_model_exclude_none=True,
+)
+async def approve_permission(
+    request: Request,
+    body: PermissionApprovalRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> ChatResponse:
+    """Approve one exact step/tool permission and resume its checkpoint."""
+    optional_authenticated_user_or_static_auth(request, authorization)
+    graph = request.app.state.graph
+    config = {"configurable": {"thread_id": body.thread_id}}
+    snapshot = await graph.aget_state(config)
+    state = snapshot.values or {}
+    pending = state.get("pending_permission") if state else None
+    if state.get("status") != "waiting_confirmation" or not isinstance(pending, dict):
+        raise HTTPException(status_code=409, detail="当前线程没有待审批操作")
+    if (
+        pending.get("step_id") != body.step_id
+        or pending.get("tool_name") != body.tool_name
+    ):
+        raise HTTPException(status_code=409, detail="审批对象与当前待审批操作不匹配")
+
+    if body.decision == "cancel":
+        await graph.aupdate_state(
+            config,
+            {
+                "status": "failed",
+                "failure_reason": "用户已取消执行",
+                "pending_permission": None,
+                "permission_action": "DENY",
+            },
+        )
+        return ChatResponse(reply="已取消该操作，未执行对应工具。")
+
+    approval_key = f"{body.step_id}:{body.tool_name}"
+    approved = list(state.get("approved_permission_keys", []))
+    if approval_key not in approved:
+        approved.append(approval_key)
+    await graph.aupdate_state(
+        config,
+        {
+            "approved_permission_keys": approved,
+            "pending_permission": None,
+            "permission_action": "ALLOW",
+            "status": "executing",
+            "failure_reason": None,
+        },
+        as_node="select_step",
+    )
+    result = await graph.ainvoke(None, config=config)
+    if result.get("status") == "waiting_confirmation" and isinstance(
+        result.get("pending_permission"), dict
+    ):
+        return ChatResponse(reply="", permission_required=result["pending_permission"])
+    messages = result.get("messages", [])
+    last = messages[-1] if messages else None
+    text = _strip_reasoning_blocks(
+        _message_content_to_text(getattr(last, "content", "") if last else "")
+    )
+    text = _append_chart_urls(text, _extract_chart_urls(messages))
+    return ChatResponse(reply=text)
+
+
 @router.post("/chat/stream")
 async def chat_stream(
     request: Request,
@@ -325,6 +399,8 @@ async def chat_stream(
         messages: list[Any] = list(input_messages)
         streamed_reply = ""
         buffer_for_review = False
+        awaiting_permission = False
+        permission_halted = False
         stripper = _IncrementalReasoningStripper()
         yield _ndjson_event("status", content="正在思考...")
 
@@ -394,11 +470,20 @@ async def chat_stream(
                         step_id = update.get("current_step_id")
                         if step_id and update.get("status") == "executing":
                             yield _ndjson_event("step_started", step_id=step_id)
-                        elif update.get("status") == "waiting_confirmation":
+                    elif node_name == "permission_gate" and isinstance(update, dict):
+                        pending = update.get("pending_permission")
+                        if update.get("permission_action") == "NEED_CONFIRM" and isinstance(
+                            pending, dict
+                        ):
+                            awaiting_permission = True
+                            yield _ndjson_event("permission_required", **pending)
+                        elif update.get("permission_action") == "DENY" and isinstance(
+                            pending, dict
+                        ):
+                            permission_halted = True
                             yield _ndjson_event(
-                                "confirmation_required",
-                                step_id=step_id,
-                                reason=update.get("failure_reason", ""),
+                                "error",
+                                message=pending.get("reason", "操作已被权限策略拒绝"),
                             )
                     elif node_name == "evaluator" and isinstance(update, dict):
                         action = update.get("evaluation_action")
@@ -433,6 +518,9 @@ async def chat_stream(
                         yield _ndjson_event(
                             "status", content="执行预算已达到上限，正在整理部分结果..."
                         )
+
+            if awaiting_permission or permission_halted:
+                return
 
             tail = stripper.feed("", final=True)
             if tail:
