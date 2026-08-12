@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,5 +26,7 @@ class StepResult(BaseModel):
     status: Literal["success", "partial", "failed"]
     summary: str
     evidence: list[str] = Field(default_factory=list)
+    structured_facts: list[dict[str, Any]] = Field(default_factory=list)
+    result_references: list[dict[str, Any]] = Field(default_factory=list)
     tool_calls: list[str] = Field(default_factory=list)
     error: str | None = None

@@ -11,15 +11,25 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from chaincloud_agent_service.agent.answer_composer import acompose_final_answer
+from chaincloud_agent_service.agent.answer_composer.complexity import choose_answer_style
+from chaincloud_agent_service.agent.answer_composer.composer import _system_prompt_for_style
+from chaincloud_agent_service.agent.context_builder import ContextBuilder
 from chaincloud_agent_service.agent.evaluation import evaluate_step
 from chaincloud_agent_service.agent.planning import Plan, StepResult, create_plan
+from chaincloud_agent_service.agent.planning.planner import PLANNER_SYSTEM_PROMPT
 from chaincloud_agent_service.agent.permission import evaluate_step_permission
 from chaincloud_agent_service.agent.review import direct_requires_review, review_answer
+from chaincloud_agent_service.agent.review.reviewer import REVIEWER_SYSTEM_PROMPT
 from chaincloud_agent_service.agent.routing import decide_route
+from chaincloud_agent_service.agent.routing.router import ROUTER_SYSTEM_PROMPT
 from chaincloud_agent_service.agent.schema_context import build_agent_system_prompt
 from chaincloud_agent_service.agent.state import AgentState
 from chaincloud_agent_service.agent.state_validation import validate_step_state
 from chaincloud_agent_service.agent.tool_recovery import RecoveringToolNode, parse_tool_error
+from chaincloud_agent_service.agent.tool_results import (
+    FileToolResultStore,
+    tool_result_metadata,
+)
 from chaincloud_agent_service.config import Settings
 from chaincloud_agent_service.observability.trace import (
     append_trace_event,
@@ -159,6 +169,7 @@ def compile_agent_graph(
         str(getattr(tool, "name", tool.__class__.__name__)) for tool in tools
     }
     system_prompt = build_agent_system_prompt(settings)
+    context_builder = ContextBuilder.from_settings(settings)
     base_model = ChatOpenAI(
         model=settings.openai_model,
         api_key=settings.openai_api_key,
@@ -170,7 +181,16 @@ def compile_agent_graph(
     max_tool_retries = int(getattr(settings, "max_tool_retries", 2))
     max_step_retries = int(getattr(settings, "max_step_retries", 2))
     max_total_tool_calls = int(getattr(settings, "max_total_tool_calls", 12))
-    tool_node = RecoveringToolNode(tools, max_retries=max_tool_retries) if tools else None
+    result_store = FileToolResultStore(
+        str(getattr(settings, "tool_result_store_path", "tool_results"))
+    )
+    tool_node = RecoveringToolNode(
+        tools, max_retries=max_tool_retries, result_store=result_store,
+        compression_threshold_bytes=int(
+            getattr(settings, "tool_result_compression_threshold_bytes", 16000)
+        ),
+        preview_chars=int(getattr(settings, "tool_result_preview_chars", 1000)),
+    ) if tools else None
 
     def prepare_request_node(state: AgentState) -> dict[str, Any]:
         goal = _latest_user_question(list(state["messages"]))
@@ -236,12 +256,18 @@ def compile_agent_graph(
 
     def router_node(state: AgentState) -> dict[str, Any]:
         messages = list(state["messages"])
+        context = context_builder.router(
+            system_prompt=ROUTER_SYSTEM_PROMPT,
+            current_request=_latest_user_question(messages), history=messages,
+            tool_names=", ".join(sorted(available_tool_names)) or "无",
+        )
         decision = decide_route(
             base_model,
             _latest_user_question(messages),
             tools,
             requested_mode=state.get("requested_mode", "auto"),
             conversation_context=_planning_context(messages),
+            model_messages=context.messages,
         )
         update: dict[str, Any] = {
             "execution_mode": decision.mode,
@@ -265,6 +291,7 @@ def compile_agent_graph(
             "replanning_count": 0,
             "tool_call_count": 0,
             "last_tool_errors": [],
+            "tool_result_records": [],
             "permission_failure": None,
             "direct_tool_call_count": 0,
             "step_tool_call_count": 0,
@@ -285,6 +312,7 @@ def compile_agent_graph(
             "reason": decision.reason, "confidence": decision.confidence,
             "source": decision.source,
         })
+        append_trace_event(state, update, "context_events", context.audit)
         return update
 
     def router_route(state: AgentState) -> str:
@@ -292,13 +320,22 @@ def compile_agent_graph(
 
     def planner_node(state: AgentState) -> dict[str, Any]:
         goal = _latest_user_question(list(state["messages"]))
+        catalog = "\n".join(
+            f"- {getattr(tool, 'name', tool.__class__.__name__)}: {str(getattr(tool, 'description', ''))[:300]}"
+            for tool in tools
+        ) or "当前没有可用工具。"
+        context = context_builder.planner(
+            system_prompt=PLANNER_SYSTEM_PROMPT,
+            current_request=goal, history=list(state["messages"]), tool_catalog=catalog,
+        )
         plan, attempts = create_plan(
             base_model,
             goal,
             tools,
             conversation_context=_planning_context(list(state["messages"])),
+            model_messages=context.messages,
         )
-        return {
+        update = {
             "plan": plan.model_dump(),
             "current_step_id": None,
             "approved_step_ids": [],
@@ -324,6 +361,8 @@ def compile_agent_graph(
             "status": "planning",
             "failure_reason": None,
         }
+        append_trace_event(state, update, "context_events", context.audit)
+        return update
 
     def direct_agent_node(state: AgentState) -> dict[str, list[Any]]:
         msgs: list[Any] = list(state["messages"])
@@ -336,13 +375,15 @@ def compile_agent_graph(
         combined_prompt = "\n\n---\n\n".join(
             part for part in (system_prompt, direct_prompt) if part
         )
-        if msgs and isinstance(msgs[0], SystemMessage):
-            msgs[0] = SystemMessage(
-                content=f"{combined_prompt}\n\n---\n\n长期记忆背景：\n{msgs[0].content}"
-            )
-        elif combined_prompt:
-            msgs = [SystemMessage(content=combined_prompt), *msgs]
-        return {"messages": [executor_model.invoke(msgs)]}
+        context = context_builder.executor(
+            scene="direct_executor", system_prompt=combined_prompt,
+            current_request=_latest_user_question(msgs),
+            critical_state="Direct 模式；只读工具可直接调用，副作用操作不得绕过权限边界。",
+            messages=msgs,
+        )
+        update: dict[str, Any] = {"messages": [executor_model.invoke(context.messages)]}
+        append_trace_event(state, update, "context_events", context.audit)
+        return update
 
     def direct_agent_route(state: AgentState) -> str:
         messages = list(state["messages"])
@@ -504,16 +545,21 @@ def compile_agent_graph(
                 "仅瞬时错误由工具层自动重试。请做语义修复：可修正参数、补充查询或使用计划声明的 fallback。"
                 "权限/guardrail 错误严禁用等价工具绕过；缺少关键结果时不得编造。"
             )
-        combined_prompt = "\n\n---\n\n".join(
-            part for part in (system_prompt, execution_prompt) if part
+        combined_prompt = system_prompt
+        critical_state = (
+            f"{execution_prompt}\n权限状态："
+            f"{json.dumps({'action': state.get('permission_action'), 'approved_permission_keys': state.get('approved_permission_keys', []), 'pending_permission': state.get('pending_permission')}, ensure_ascii=False)}"
         )
-        if msgs and isinstance(msgs[0], SystemMessage):
-            msgs[0] = SystemMessage(
-                content=f"{combined_prompt}\n\n---\n\n长期记忆背景：\n{msgs[0].content}"
-            )
-        elif combined_prompt:
-            msgs = [SystemMessage(content=combined_prompt), *msgs]
-        return {"messages": [executor_model.invoke(msgs)]}
+        step_start = int(state.get("step_message_start", len(msgs)))
+        evidence = list(msgs[step_start:])
+        context = context_builder.executor(
+            scene="planned_executor", system_prompt=combined_prompt,
+            current_request=_latest_user_question(msgs), critical_state=critical_state,
+            messages=msgs, dependency_evidence=evidence,
+        )
+        update: dict[str, Any] = {"messages": [executor_model.invoke(context.messages)]}
+        append_trace_event(state, update, "context_events", context.audit)
+        return update
 
     def executor_route(state: AgentState) -> str:
         messages = list(state["messages"])
@@ -558,6 +604,10 @@ def compile_agent_graph(
             "messages": result.get("messages", []),
             "tool_call_count": state.get("tool_call_count", 0) + attempts,
             "last_tool_errors": errors,
+            "tool_result_records": [
+                *state.get("tool_result_records", []),
+                *result.get("tool_result_records", []),
+            ],
             "tool_events": [*state.get("tool_events", []), *result.get("tool_events", [])],
         }
         new_error_events = [
@@ -661,6 +711,22 @@ def compile_agent_graph(
             status=status,
             summary=summary or "执行器没有生成有效结果",
             evidence=[_message_text(message)[:2000] for message in tool_messages],
+            structured_facts=[
+                metadata.get("structured_facts", {})
+                for message in tool_messages
+                if (metadata := tool_result_metadata(message)) is not None
+            ],
+            result_references=[
+                {
+                    key: metadata.get(key)
+                    for key in (
+                        "result_id", "tool_name", "tool_args", "created_at",
+                        "evidence_source", "raw_result_location", "content_sha256",
+                    )
+                }
+                for message in tool_messages
+                if (metadata := tool_result_metadata(message)) is not None
+            ],
             tool_calls=[
                 str(getattr(message, "name", None) or "unknown_tool")
                 for message in tool_messages
@@ -766,13 +832,22 @@ def compile_agent_graph(
             },
             ensure_ascii=False,
         )
+        catalog = "\n".join(
+            f"- {getattr(tool, 'name', tool.__class__.__name__)}: {str(getattr(tool, 'description', ''))[:300]}"
+            for tool in tools
+        ) or "当前没有可用工具。"
+        replan_context = context_builder.planner(
+            system_prompt=PLANNER_SYSTEM_PROMPT, current_request=old_plan.goal,
+            history=list(state["messages"]), tool_catalog=catalog, feedback=context,
+        )
         plan, attempts = create_plan(
             base_model,
             old_plan.goal,
             tools,
             conversation_context=context,
+            model_messages=replan_context.messages,
         )
-        return {
+        update = {
             "plan": plan.model_dump(),
             "current_step_id": None,
             "step_results": [],
@@ -790,6 +865,8 @@ def compile_agent_graph(
             "status": "planning",
             "failure_reason": None,
         }
+        append_trace_event(state, update, "context_events", replan_context.audit)
+        return update
 
     def review_gate_node(state: AgentState) -> dict[str, Any]:
         status = state.get("status")
@@ -826,8 +903,26 @@ def compile_agent_graph(
                     )
                 )
             )
-        response = await acompose_final_answer(base_model, messages)
-        return {"messages": [response]}
+        current_request = _latest_user_question(messages)
+        latest_user_index = max(
+            (index for index, message in enumerate(messages) if isinstance(message, HumanMessage)),
+            default=-1,
+        )
+        evidence = [
+            message for message in messages[latest_user_index + 1:]
+            if isinstance(message, ToolMessage)
+        ]
+        memory = [message for message in messages if isinstance(message, SystemMessage) and "长期记忆" in _message_text(message)]
+        draft = next((_message_text(message) for message in reversed(messages) if isinstance(message, AIMessage) and not _tool_calls(message)), "")
+        context = context_builder.answer_composer(
+            system_prompt=_system_prompt_for_style(choose_answer_style(messages)),
+            current_request=current_request, execution_summary=_execution_summary(state),
+            evidence=evidence, draft=draft, memory=memory,
+        )
+        response = await acompose_final_answer(base_model, messages, model_messages=context.messages)
+        update: dict[str, Any] = {"messages": [response]}
+        append_trace_event(state, update, "context_events", context.audit)
+        return update
 
     def after_compose_route(state: AgentState) -> str:
         return "review" if state.get("review_required") else "end"
@@ -835,17 +930,25 @@ def compile_agent_graph(
     def reviewer_node(state: AgentState) -> dict[str, Any]:
         messages = list(state["messages"])
         answer = _message_text(messages[-1]) if messages else ""
+        review_context = context_builder.reviewer(
+            system_prompt=REVIEWER_SYSTEM_PROMPT,
+            current_request=_latest_user_question(messages), answer=answer,
+            execution_summary=_execution_summary(state),
+        )
         decision = review_answer(
             base_model,
             _latest_user_question(messages),
             answer,
             _execution_summary(state),
+            model_messages=review_context.messages,
         )
-        return {
+        update = {
             "review_action": decision.action,
             "review_feedback": decision.feedback or decision.reason,
             "review_attempts": state.get("review_attempts", 0) + 1,
         }
+        append_trace_event(state, update, "context_events", review_context.audit)
+        return update
 
     def execution_completed_node(state: AgentState) -> dict[str, Any]:
         return {"request_summary": build_request_summary(state)}

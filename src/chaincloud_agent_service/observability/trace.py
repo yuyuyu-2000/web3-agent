@@ -17,6 +17,7 @@ EXECUTION_EVENT_KEYS = (
     "tool_events",
     "decision_events",
     "error_events",
+    "context_events",
 )
 
 
@@ -85,6 +86,7 @@ def new_execution_context(thread_id: str) -> dict[str, Any]:
         "tool_events": [],
         "decision_events": [],
         "error_events": [],
+        "context_events": [],
         "request_summary": None,
     }
 
@@ -177,6 +179,7 @@ def build_request_summary(state: dict[str, Any]) -> dict[str, Any]:
     tool_events = list(state.get("tool_events", []))
     decision_events = list(state.get("decision_events", []))
     error_events = list(state.get("error_events", []))
+    context_events = list(state.get("context_events", []))
     started = state.get("trace_started_monotonic")
     duration_ms = (
         round((time.monotonic() - float(started)) * 1000, 3)
@@ -208,17 +211,20 @@ def build_request_summary(state: dict[str, Any]) -> dict[str, Any]:
         "permission_checks": sum(1 for event in decision_events if event.get("decision_type") == "permission_gate"),
         "fallbacks": sum(1 for event in tool_events if event.get("fallback_tool") and event.get("status") == "success"),
         "errors": len(error_events),
+        "context_builds": len(context_events),
+        "context_trimmed_items": sum(len(event.get("trimmed", [])) for event in context_events),
         "final_status": final_status,
     })
 
 
 def execution_trace_from_state(state: dict[str, Any]) -> dict[str, Any]:
-    return {
+    return safe_trace_event({
         "trace_id": state.get("trace_id"),
         "thread_id": state.get("trace_thread_id"),
         **{key: list(state.get(key, [])) for key in EXECUTION_EVENT_KEYS},
+        "tool_result_records": list(state.get("tool_result_records", [])),
         "request_summary": state.get("request_summary") or build_request_summary(state),
-    }
+    })
 
 
 def _preview(value: Any, max_len: int = 500) -> str:

@@ -153,6 +153,8 @@ def test_execution_trace_summary_uses_unified_event_buckets():
             {"decision_type": "evaluator", "action": "retry"},
         ],
         "error_events": [{"source": "tool", "error_type": "timeout"}],
+        "context_events": [{"scene": "router", "trimmed": [{"category": "summary"}]}],
+        "tool_result_records": [{"result_id": "raw-1", "tool_args": {"api_key": "secret"}}],
     }
     summary = build_request_summary(state)
     trace = execution_trace_from_state({**state, "request_summary": summary})
@@ -163,4 +165,9 @@ def test_execution_trace_summary_uses_unified_event_buckets():
     assert summary["step_retries"] == 1
     assert summary["permission_checks"] == 1
     assert summary["errors"] == 1
+    assert summary["context_builds"] == 1
+    assert summary["context_trimmed_items"] == 1
+    assert trace["context_events"][0]["scene"] == "router"
+    assert trace["tool_result_records"][0]["result_id"] == "raw-1"
+    assert trace["tool_result_records"][0]["tool_args"]["api_key"] == "[REDACTED]"
     assert summary["final_status"] == "degraded"

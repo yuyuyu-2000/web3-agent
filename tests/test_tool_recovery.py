@@ -41,6 +41,8 @@ def test_transient_error_retries_inside_tool_node_then_succeeds() -> None:
     ]
     assert [event["attempt"] for event in result["tool_events"]] == [1, 2, 3]
     assert result["tool_events"][-1]["recovered"] is True
+    assert len(result["tool_result_records"]) == 1
+    assert result["tool_result_records"][0]["result_id"]
 
 
 def test_non_retryable_error_returns_structured_message_once() -> None:
@@ -62,6 +64,7 @@ def test_non_retryable_error_returns_structured_message_once() -> None:
         "retryable": False, "permission_error": False,
         "message": "invalid argument: value", "attempts": 1,
     }
+    assert result["tool_result_records"][0]["compressed"] is False
 
 
 def test_permission_error_is_never_retryable() -> None:

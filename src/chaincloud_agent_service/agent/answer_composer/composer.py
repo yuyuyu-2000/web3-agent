@@ -64,13 +64,15 @@ def compose_final_answer(model: Any, messages: list[Any]) -> AIMessage:
     return AIMessage(content=text)
 
 
-async def acompose_final_answer(model: Any, messages: list[Any]) -> AIMessage:
+async def acompose_final_answer(
+    model: Any, messages: list[Any], *, model_messages: list[Any] | None = None
+) -> AIMessage:
     """Generate the final answer through the model's native async token stream."""
     draft = _last_ai_text(messages)
     parts: list[str] = []
 
     try:
-        async for chunk in model.astream(_build_composer_messages(messages)):
+        async for chunk in model.astream(model_messages or _build_composer_messages(messages)):
             parts.append(message_content_to_text(getattr(chunk, "content", "")))
     except OpenAIError:
         parts = []

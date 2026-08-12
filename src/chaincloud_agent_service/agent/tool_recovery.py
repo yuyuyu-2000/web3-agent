@@ -10,6 +10,12 @@ from typing import Any, Callable
 
 from langchain_core.messages import ToolMessage
 
+from chaincloud_agent_service.agent.tool_results import (
+    InMemoryToolResultStore,
+    ToolResultStore,
+    process_tool_result,
+)
+
 
 @dataclass(frozen=True)
 class ClassifiedToolError:
@@ -147,6 +153,9 @@ class RecoveringToolNode:
         backoff_base_sec: float = 0.25,
         sleeper: Callable[[float], None] = time.sleep,
         random_fn: Callable[[], float] = random.random,
+        result_store: ToolResultStore | None = None,
+        compression_threshold_bytes: int = 16_000,
+        preview_chars: int = 1_000,
     ) -> None:
         self.tools = {
             str(getattr(tool, "name", tool.__class__.__name__)): tool for tool in tools
@@ -155,6 +164,21 @@ class RecoveringToolNode:
         self.backoff_base_sec = max(0.0, backoff_base_sec)
         self.sleeper = sleeper
         self.random_fn = random_fn
+        self.result_store = result_store or InMemoryToolResultStore()
+        self.compression_threshold_bytes = max(1, compression_threshold_bytes)
+        self.preview_chars = max(0, preview_chars)
+
+    def _result_message(
+        self, *, name: str, args: dict[str, Any], call_id: str, content: str,
+        error: dict[str, Any] | None = None,
+    ) -> tuple[ToolMessage, dict[str, Any]]:
+        message, metadata = process_tool_result(
+            store=self.result_store, tool_name=name or "unknown_tool", tool_args=args,
+            raw_content=content, threshold_bytes=self.compression_threshold_bytes,
+            preview_chars=self.preview_chars, error=error,
+        )
+        message.tool_call_id = call_id
+        return message, metadata
 
     def invoke(
         self, state: dict[str, Any], *, remaining_budget: int | None = None,
@@ -165,6 +189,7 @@ class RecoveringToolNode:
         results: list[ToolMessage] = []
         total_attempts = 0
         tool_events: list[dict[str, Any]] = []
+        result_records: list[dict[str, Any]] = []
         fallback_tools = fallback_tools or set()
         for index, call in enumerate(calls):
             name = str(
@@ -194,13 +219,12 @@ class RecoveringToolNode:
                         "全局工具调用预算已达到上限",
                         attempts,
                     )
-                    results.append(
-                        ToolMessage(
-                            content=json.dumps(payload, ensure_ascii=False),
-                            tool_call_id=call_id,
-                            name=name or "unknown_tool",
-                        )
+                    message, metadata = self._result_message(
+                        name=name, args=args, call_id=call_id,
+                        content=json.dumps(payload, ensure_ascii=False), error=payload,
                     )
+                    results.append(message)
+                    result_records.append(metadata)
                     break
                 attempts += 1
                 total_attempts += 1
@@ -229,20 +253,23 @@ class RecoveringToolNode:
                             attempts,
                             classified.permission_error,
                         )
-                        results.append(
-                            ToolMessage(
-                                content=json.dumps(payload, ensure_ascii=False),
-                                tool_call_id=call_id,
-                                name=name,
-                            )
+                        message, metadata = self._result_message(
+                            name=name, args=args, call_id=call_id,
+                            content=json.dumps(payload, ensure_ascii=False), error=payload,
                         )
+                        results.append(message)
+                        result_records.append(metadata)
                         break
                     content = (
                         value
                         if isinstance(value, str)
                         else json.dumps(value, ensure_ascii=False, default=str)
                     )
-                    results.append(ToolMessage(content=content, tool_call_id=call_id, name=name))
+                    message, metadata = self._result_message(
+                        name=name, args=args, call_id=call_id, content=content,
+                    )
+                    results.append(message)
+                    result_records.append(metadata)
                     tool_events.append(self._tool_event(
                         state, name, call_id, step_id, attempts, started, "success",
                         None, False, attempts > 1, name if name in fallback_tools else None,
@@ -267,15 +294,17 @@ class RecoveringToolNode:
                         attempts,
                         classified.permission_error,
                     )
-                    results.append(
-                        ToolMessage(
-                            content=json.dumps(payload, ensure_ascii=False),
-                            tool_call_id=call_id,
-                            name=name or "unknown_tool",
-                        )
+                    message, metadata = self._result_message(
+                        name=name, args=args, call_id=call_id,
+                        content=json.dumps(payload, ensure_ascii=False), error=payload,
                     )
+                    results.append(message)
+                    result_records.append(metadata)
                     break
-        return {"messages": results, "attempts": total_attempts, "tool_events": tool_events}
+        return {
+            "messages": results, "attempts": total_attempts,
+            "tool_events": tool_events, "tool_result_records": result_records,
+        }
 
     @staticmethod
     def _tool_event(

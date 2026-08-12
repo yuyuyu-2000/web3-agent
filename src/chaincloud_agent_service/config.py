@@ -42,6 +42,12 @@ class Settings:
     openai_model: str
     openai_timeout_sec: int
     openai_max_retries: int
+    model_context_window: int
+    max_input_tokens: int
+    reserved_output_tokens: int
+    tool_result_store_path: str
+    tool_result_compression_threshold_bytes: int
+    tool_result_preview_chars: int
     chat_api_token: str | None
     web_search_enabled: bool
     web_search_provider: str
@@ -148,6 +154,22 @@ def load_settings() -> Settings:
     max_tool_retries = bounded_int("MAX_TOOL_RETRIES", 2, 0, 10)
     max_step_retries = bounded_int("MAX_STEP_RETRIES", 2, 0, 10)
     max_total_tool_calls = bounded_int("MAX_TOTAL_TOOL_CALLS", 12, 1, 100)
+    model_context_window = bounded_int("MODEL_CONTEXT_WINDOW", 128000, 1024, 2000000)
+    reserved_output_tokens = bounded_int("RESERVED_OUTPUT_TOKENS", 8000, 128, model_context_window - 1)
+    max_input_tokens = bounded_int(
+        "MAX_INPUT_TOKENS", min(96000, model_context_window - reserved_output_tokens),
+        256, model_context_window - reserved_output_tokens,
+    )
+    tool_result_store_path = (
+        os.environ.get("TOOL_RESULT_STORE_PATH", "tool_results").strip()
+        or "tool_results"
+    )
+    tool_result_compression_threshold_bytes = bounded_int(
+        "TOOL_RESULT_COMPRESSION_THRESHOLD_BYTES", 16000, 256, 100000000
+    )
+    tool_result_preview_chars = bounded_int(
+        "TOOL_RESULT_PREVIEW_CHARS", 1000, 0, 10000
+    )
     monitor_enabled = os.environ.get("MONITOR_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
     token = os.environ.get("CHAT_API_TOKEN", "").strip()
     web_search_enabled = os.environ.get("WEB_SEARCH_ENABLED", "0").strip().lower() in (
@@ -249,6 +271,12 @@ def load_settings() -> Settings:
         openai_model=model,
         openai_timeout_sec=openai_timeout_sec,
         openai_max_retries=openai_max_retries,
+        model_context_window=model_context_window,
+        max_input_tokens=max_input_tokens,
+        reserved_output_tokens=reserved_output_tokens,
+        tool_result_store_path=tool_result_store_path,
+        tool_result_compression_threshold_bytes=tool_result_compression_threshold_bytes,
+        tool_result_preview_chars=tool_result_preview_chars,
         chat_api_token=token or None,
         web_search_enabled=web_search_enabled,
         web_search_provider=web_search_provider,

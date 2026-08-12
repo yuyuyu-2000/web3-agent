@@ -56,6 +56,7 @@ def decide_route(
     tools: list[Any],
     requested_mode: RequestedPlanningMode = "auto",
     conversation_context: str = "",
+    model_messages: list[Any] | None = None,
 ) -> RouteDecision:
     if requested_mode in {"direct", "planned"}:
         return RouteDecision(
@@ -77,7 +78,7 @@ def decide_route(
     )
     try:
         response = model.invoke(
-            [
+            model_messages or [
                 SystemMessage(content=ROUTER_SYSTEM_PROMPT),
                 HumanMessage(content=prompt),
             ]
@@ -100,4 +101,3 @@ def decide_route(
             signals=["router_error"],
             source="fallback",
         )
-

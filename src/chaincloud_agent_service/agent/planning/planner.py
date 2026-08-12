@@ -79,6 +79,7 @@ def create_plan(
     user_goal: str,
     tools: list[Any],
     conversation_context: str = "",
+    model_messages: list[Any] | None = None,
 ) -> tuple[Plan, int]:
     """Create and validate a plan, retrying once before safe single-step fallback."""
 
@@ -94,7 +95,7 @@ def create_plan(
         )
         try:
             response = model.invoke(
-                [
+                model_messages or [
                     SystemMessage(content=PLANNER_SYSTEM_PROMPT),
                     HumanMessage(content=prompt),
                 ]

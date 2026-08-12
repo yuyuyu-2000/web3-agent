@@ -79,6 +79,7 @@ def review_answer(
     user_message: str,
     answer: str,
     execution_summary: str,
+    model_messages: list[Any] | None = None,
 ) -> ReviewDecision:
     prompt = json.dumps(
         {
@@ -90,7 +91,7 @@ def review_answer(
     )
     try:
         response = model.invoke(
-            [
+            model_messages or [
                 SystemMessage(content=REVIEWER_SYSTEM_PROMPT),
                 HumanMessage(content=prompt),
             ]
@@ -103,4 +104,3 @@ def review_answer(
             feedback="",
             confidence=0.0,
         )
-

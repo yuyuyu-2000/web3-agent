@@ -15,5 +15,6 @@ tmp/
 
 # Generated chart outputs
 charts/
+tool_results/
 
 tasks.json

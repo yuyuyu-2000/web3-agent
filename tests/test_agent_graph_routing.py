@@ -76,6 +76,10 @@ def test_graph_switches_between_direct_and_planned_on_same_thread() -> None:
     assert direct["execution_mode"] == "direct"
     assert direct["plan"] is None
     assert direct["status"] == "completed"
+    assert {event["scene"] for event in direct["context_events"]} >= {
+        "direct_executor", "answer_composer"
+    }
+    assert all(event["total_tokens"] <= event["max_input_tokens"] for event in direct["context_events"])
     assert planned["execution_mode"] == "planned"
     assert planned["status"] == "completed"
     assert len(planned["step_results"]) == 1

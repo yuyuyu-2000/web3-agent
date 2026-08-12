@@ -39,3 +39,27 @@ def test_load_settings_reads_postgres_memory_backend(monkeypatch):
     )
     assert settings.memory_postgres_table == "agent_memories_test"
     assert settings.memory_postgres_auto_create is True
+
+
+def test_load_settings_context_budget_is_bounded_by_window(monkeypatch):
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "4096")
+    monkeypatch.setenv("RESERVED_OUTPUT_TOKENS", "1024")
+    monkeypatch.setenv("MAX_INPUT_TOKENS", "9000")
+
+    settings = load_settings()
+
+    assert settings.model_context_window == 4096
+    assert settings.reserved_output_tokens == 1024
+    assert settings.max_input_tokens == 3072
+
+
+def test_load_settings_tool_result_compression(monkeypatch):
+    monkeypatch.setenv("TOOL_RESULT_STORE_PATH", "tmp/results")
+    monkeypatch.setenv("TOOL_RESULT_COMPRESSION_THRESHOLD_BYTES", "4096")
+    monkeypatch.setenv("TOOL_RESULT_PREVIEW_CHARS", "256")
+
+    settings = load_settings()
+
+    assert settings.tool_result_store_path == "tmp/results"
+    assert settings.tool_result_compression_threshold_bytes == 4096
+    assert settings.tool_result_preview_chars == 256
