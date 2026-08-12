@@ -36,6 +36,11 @@ def test_transient_error_retries_inside_tool_node_then_succeeds() -> None:
 
     assert result["attempts"] == 3
     assert result["messages"][0].content == "ok:1"
+    assert [event["status"] for event in result["tool_events"]] == [
+        "error", "error", "success"
+    ]
+    assert [event["attempt"] for event in result["tool_events"]] == [1, 2, 3]
+    assert result["tool_events"][-1]["recovered"] is True
 
 
 def test_non_retryable_error_returns_structured_message_once() -> None:

@@ -18,7 +18,9 @@ from chaincloud_agent_service.api.auth import optional_authenticated_user_or_sta
 from chaincloud_agent_service.auth.store import UserRecord
 from chaincloud_agent_service.observability.trace import (
     ChatTraceEvent,
+    execution_trace_from_state,
     extract_agent_trace,
+    new_execution_context,
 )
 
 router = APIRouter()
@@ -60,6 +62,7 @@ class ChatResponse(BaseModel):
     failure_reason: str | None = None
     failed_tools: list[dict[str, Any]] | None = None
     trace: list[ChatTraceEvent] | None = None
+    execution_trace: dict[str, Any] | None = None
     permission_required: dict[str, Any] | None = None
     clarification_required: dict[str, Any] | None = None
 
@@ -300,10 +303,11 @@ async def chat(
     graph = request.app.state.graph
     config = {"configurable": {"thread_id": body.thread_id}}
     input_messages = _build_input_messages(request, body, current_user)
+    execution_context = new_execution_context(body.thread_id)
 
     try:
         result = await graph.ainvoke(
-            {"messages": input_messages, "requested_mode": body.planning},
+            {"messages": input_messages, "requested_mode": body.planning, **execution_context},
             config=config,
         )
     except APIStatusError as exc:
@@ -336,6 +340,7 @@ async def chat(
         return ChatResponse(
             reply=text,
             trace=extract_agent_trace(messages, max_preview_chars=body.trace_max_chars),
+            execution_trace=execution_trace_from_state({**execution_context, **result}),
             **_result_metadata(result),
         )
     return ChatResponse(reply=text, **_result_metadata(result))
@@ -483,6 +488,7 @@ async def chat_stream(
     graph = request.app.state.graph
     config = {"configurable": {"thread_id": body.thread_id}}
     input_messages = _build_input_messages(request, body, current_user)
+    execution_context = new_execution_context(body.thread_id)
 
     async def events() -> AsyncIterator[bytes]:
         messages: list[Any] = list(input_messages)
@@ -492,12 +498,13 @@ async def chat_stream(
         permission_halted = False
         awaiting_clarification = False
         final_metadata: dict[str, Any] = {}
+        emitted_tool_events: set[tuple[str, int]] = set()
         stripper = _IncrementalReasoningStripper()
         yield _ndjson_event("status", content="正在思考...")
 
         try:
             async for mode, data in graph.astream(
-                {"messages": input_messages, "requested_mode": body.planning},
+                {"messages": input_messages, "requested_mode": body.planning, **execution_context},
                 config=config,
                 stream_mode=["messages", "updates"],
             ):
@@ -522,7 +529,11 @@ async def chat_stream(
                     continue
                 for node_name, update in data.items():
                     if isinstance(update, dict):
-                        for key in ("status", "failure_reason", "last_tool_errors", "permission_failure"):
+                        for key in (
+                            "status", "failure_reason", "last_tool_errors",
+                            "permission_failure", "node_events", "tool_events",
+                            "decision_events", "error_events", "request_summary",
+                        ):
                             if key in update:
                                 final_metadata[key] = update[key]
                         node_messages = update.get("messages", [])
@@ -566,6 +577,13 @@ async def chat_stream(
                             yield _ndjson_event("step_started", step_id=step_id)
                     elif node_name == "permission_gate" and isinstance(update, dict):
                         pending = update.get("pending_permission")
+                        yield _ndjson_event(
+                            "permission_checked",
+                            trace_id=execution_context["trace_id"],
+                            action=str(update.get("permission_action", "")).lower(),
+                            risk_level=(pending or {}).get("risk_level", "none"),
+                            reason=(pending or {}).get("reason", ""),
+                        )
                         if update.get("permission_action") == "NEED_CONFIRM" and isinstance(
                             pending, dict
                         ):
@@ -614,7 +632,23 @@ async def chat_stream(
                             action=update.get("review_action"),
                         )
                     elif node_name == "tools":
+                        if isinstance(update, dict):
+                            current_events = update.get("tool_events", [])
+                            for event in current_events:
+                                event_key = (str(event.get("tool_call_id", "")), int(event.get("attempt", 0)))
+                                if event_key in emitted_tool_events:
+                                    continue
+                                emitted_tool_events.add(event_key)
+                                if event.get("attempt", 1) > 1:
+                                    yield _ndjson_event("tool_retry", **event)
+                                if event.get("recovered"):
+                                    yield _ndjson_event("tool_recovered", **event)
                         yield _ndjson_event("status", content="工具执行完成，正在整理结果...")
+                    elif node_name == "execution_completed" and isinstance(update, dict):
+                        yield _ndjson_event(
+                            "execution_completed",
+                            **(update.get("request_summary") or {}),
+                        )
                     elif node_name in {"executor", "direct_agent"}:
                         yield _ndjson_event("status", content="正在分析执行结果...")
                     elif node_name == "budget_exceeded":
@@ -646,6 +680,9 @@ async def chat_stream(
                         messages, max_preview_chars=body.trace_max_chars
                     )
                 ]
+                payload["execution_trace"] = execution_trace_from_state(
+                    {**execution_context, **final_metadata}
+                )
             yield _ndjson_event("done", **payload)
         except APIStatusError as exc:
             yield _ndjson_event("error", message=_provider_error_detail(exc))

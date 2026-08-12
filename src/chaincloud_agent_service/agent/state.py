@@ -10,6 +10,15 @@ class AgentState(TypedDict):
     """Checkpointed state shared by planning and execution nodes."""
 
     messages: Annotated[list[Any], add_messages]
+    trace_id: NotRequired[str]
+    trace_thread_id: NotRequired[str]
+    trace_started_at: NotRequired[str]
+    trace_started_monotonic: NotRequired[float]
+    node_events: NotRequired[list[dict[str, Any]]]
+    tool_events: NotRequired[list[dict[str, Any]]]
+    decision_events: NotRequired[list[dict[str, Any]]]
+    error_events: NotRequired[list[dict[str, Any]]]
+    request_summary: NotRequired[dict[str, Any] | None]
     requested_mode: NotRequired[Literal["auto", "direct", "planned"]]
     execution_mode: NotRequired[Literal["direct", "planned"] | None]
     route_action: NotRequired[Literal["route", "resume", "clarify", "cancel"]]

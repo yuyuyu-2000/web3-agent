@@ -157,12 +157,15 @@ class RecoveringToolNode:
         self.random_fn = random_fn
 
     def invoke(
-        self, state: dict[str, Any], *, remaining_budget: int | None = None
+        self, state: dict[str, Any], *, remaining_budget: int | None = None,
+        step_id: str | None = None, fallback_tools: set[str] | None = None,
     ) -> dict[str, Any]:
         messages = list(state.get("messages", []))
         calls = list(getattr(messages[-1], "tool_calls", []) or []) if messages else []
         results: list[ToolMessage] = []
         total_attempts = 0
+        tool_events: list[dict[str, Any]] = []
+        fallback_tools = fallback_tools or set()
         for index, call in enumerate(calls):
             name = str(
                 call.get("name")
@@ -201,6 +204,7 @@ class RecoveringToolNode:
                     break
                 attempts += 1
                 total_attempts += 1
+                started = time.perf_counter()
                 try:
                     if tool is None:
                         raise ValueError(f"unknown tool: {name}")
@@ -208,6 +212,11 @@ class RecoveringToolNode:
                     returned_error = _returned_error(value)
                     if returned_error is not None:
                         classified = _classify_returned_error(returned_error)
+                        tool_events.append(self._tool_event(
+                            state, name, call_id, step_id, attempts, started,
+                            "error", classified.error_type, classified.retryable,
+                            False, name if name in fallback_tools else None,
+                        ))
                         if classified.retryable and attempts <= self.max_retries:
                             delay = self.backoff_base_sec * (2 ** (attempts - 1))
                             self.sleeper(delay * (0.5 + self.random_fn()))
@@ -234,9 +243,18 @@ class RecoveringToolNode:
                         else json.dumps(value, ensure_ascii=False, default=str)
                     )
                     results.append(ToolMessage(content=content, tool_call_id=call_id, name=name))
+                    tool_events.append(self._tool_event(
+                        state, name, call_id, step_id, attempts, started, "success",
+                        None, False, attempts > 1, name if name in fallback_tools else None,
+                    ))
                     break
                 except Exception as exc:  # tools intentionally expose heterogeneous errors
                     classified = classify_tool_error(exc)
+                    tool_events.append(self._tool_event(
+                        state, name, call_id, step_id, attempts, started, "error",
+                        classified.error_type, classified.retryable, False,
+                        name if name in fallback_tools else None,
+                    ))
                     if classified.retryable and attempts <= self.max_retries:
                         delay = self.backoff_base_sec * (2 ** (attempts - 1))
                         self.sleeper(delay * (0.5 + self.random_fn()))
@@ -257,7 +275,29 @@ class RecoveringToolNode:
                         )
                     )
                     break
-        return {"messages": results, "attempts": total_attempts}
+        return {"messages": results, "attempts": total_attempts, "tool_events": tool_events}
+
+    @staticmethod
+    def _tool_event(
+        state: dict[str, Any], tool_name: str, tool_call_id: str,
+        step_id: str | None, attempt: int, started: float, status: str,
+        error_type: str | None, retryable: bool, recovered: bool,
+        fallback_tool: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "trace_id": state.get("trace_id"),
+            "thread_id": state.get("trace_thread_id"),
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "step_id": step_id,
+            "attempt": attempt,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+            "status": status,
+            "error_type": error_type,
+            "retryable": retryable,
+            "recovered": recovered,
+            "fallback_tool": fallback_tool,
+        }
 
     @staticmethod
     def _error_payload(

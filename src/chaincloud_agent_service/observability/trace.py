@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
+import uuid
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
+
+EXECUTION_EVENT_KEYS = (
+    "node_events",
+    "tool_events",
+    "decision_events",
+    "error_events",
+)
 
 
 class ChatTraceEvent(BaseModel):
@@ -54,6 +68,157 @@ def _redact_for_trace(value: Any) -> Any:
         return tuple(_redact_for_trace(item) for item in value)
 
     return value
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def new_execution_context(thread_id: str) -> dict[str, Any]:
+    """Create the per-request fields stored in AgentState/checkpoints."""
+    return {
+        "trace_id": uuid.uuid4().hex,
+        "trace_thread_id": thread_id,
+        "trace_started_at": utc_now_iso(),
+        "trace_started_monotonic": time.monotonic(),
+        "node_events": [],
+        "tool_events": [],
+        "decision_events": [],
+        "error_events": [],
+        "request_summary": None,
+    }
+
+
+def safe_trace_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Redact trace payloads; observability failures must never affect execution."""
+    try:
+        return _redact_for_trace(event)
+    except Exception:  # pragma: no cover - defensive isolation
+        logger.exception("failed to sanitize agent trace event")
+        return {"type": "trace_sanitization_failed"}
+
+
+def append_trace_event(
+    state: dict[str, Any], update: dict[str, Any], bucket: str, event: dict[str, Any]
+) -> None:
+    try:
+        update[bucket] = [*state.get(bucket, []), safe_trace_event(event)]
+    except Exception:  # pragma: no cover - observability is best effort
+        logger.exception("failed to append agent trace event")
+
+
+def traced_node(node_name: str, function: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a sync LangGraph node and add one best-effort node event."""
+    def wrapped(state: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
+        started = time.perf_counter()
+        start_time = utc_now_iso()
+        try:
+            result = function(state, *args, **kwargs)
+        except Exception as exc:
+            # State updates cannot be checkpointed when LangGraph re-raises. Emit a
+            # redacted structured log so the failure location is still observable.
+            logger.exception(
+                "agent node failed trace_id=%s thread_id=%s node=%s error_type=%s",
+                state.get("trace_id"), state.get("trace_thread_id"), node_name,
+                exc.__class__.__name__,
+            )
+            raise
+        update = dict(result or {})
+        append_trace_event(
+            state,
+            update,
+            "node_events",
+            {
+                "trace_id": state.get("trace_id"),
+                "thread_id": state.get("trace_thread_id"),
+                "node_name": node_name,
+                "start_time": start_time,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+                "status": "success",
+            },
+        )
+        return update
+    return wrapped
+
+
+def traced_async_node(
+    node_name: str, function: Callable[..., Awaitable[Any]]
+) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """Async counterpart of :func:`traced_node`."""
+    async def wrapped(
+        state: dict[str, Any], *args: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        start_time = utc_now_iso()
+        try:
+            result = await function(state, *args, **kwargs)
+        except Exception as exc:
+            logger.exception(
+                "agent node failed trace_id=%s thread_id=%s node=%s error_type=%s",
+                state.get("trace_id"), state.get("trace_thread_id"), node_name,
+                exc.__class__.__name__,
+            )
+            raise
+        update = dict(result or {})
+        append_trace_event(state, update, "node_events", {
+            "trace_id": state.get("trace_id"),
+            "thread_id": state.get("trace_thread_id"),
+            "node_name": node_name,
+            "start_time": start_time,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+            "status": "success",
+        })
+        return update
+    return wrapped
+
+
+def build_request_summary(state: dict[str, Any]) -> dict[str, Any]:
+    node_events = list(state.get("node_events", []))
+    tool_events = list(state.get("tool_events", []))
+    decision_events = list(state.get("decision_events", []))
+    error_events = list(state.get("error_events", []))
+    started = state.get("trace_started_monotonic")
+    duration_ms = (
+        round((time.monotonic() - float(started)) * 1000, 3)
+        if isinstance(started, (int, float)) else sum(float(e.get("duration_ms", 0)) for e in node_events)
+    )
+    status = state.get("status")
+    if status == "completed":
+        final_status = "success"
+    elif status in {"partial", "degraded", "waiting_confirmation", "blocked_missing_state"}:
+        final_status = "partial" if status == "partial" else "degraded"
+    else:
+        final_status = "failed"
+    llm_nodes = {"executor", "direct_agent", "evaluator", "compose_answer", "reviewer"}
+    router_model_calls = sum(
+        1 for event in decision_events
+        if event.get("decision_type") == "router" and event.get("source") == "model"
+    )
+    return safe_trace_event({
+        "trace_id": state.get("trace_id"),
+        "thread_id": state.get("trace_thread_id"),
+        "total_duration_ms": duration_ms,
+        "llm_calls": (
+            sum(1 for event in node_events if event.get("node_name") in llm_nodes)
+            + int(state.get("planner_attempts", 0)) + router_model_calls
+        ),
+        "tool_calls": sum(1 for event in tool_events if event.get("attempt") == 1),
+        "tool_retries": sum(1 for event in tool_events if int(event.get("attempt", 1)) > 1),
+        "step_retries": sum(1 for event in decision_events if event.get("decision_type") == "evaluator" and event.get("action") == "retry"),
+        "permission_checks": sum(1 for event in decision_events if event.get("decision_type") == "permission_gate"),
+        "fallbacks": sum(1 for event in tool_events if event.get("fallback_tool") and event.get("status") == "success"),
+        "errors": len(error_events),
+        "final_status": final_status,
+    })
+
+
+def execution_trace_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "trace_id": state.get("trace_id"),
+        "thread_id": state.get("trace_thread_id"),
+        **{key: list(state.get(key, [])) for key in EXECUTION_EVENT_KEYS},
+        "request_summary": state.get("request_summary") or build_request_summary(state),
+    }
 
 
 def _preview(value: Any, max_len: int = 500) -> str:

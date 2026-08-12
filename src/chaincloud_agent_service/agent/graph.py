@@ -21,6 +21,12 @@ from chaincloud_agent_service.agent.state import AgentState
 from chaincloud_agent_service.agent.state_validation import validate_step_state
 from chaincloud_agent_service.agent.tool_recovery import RecoveringToolNode, parse_tool_error
 from chaincloud_agent_service.config import Settings
+from chaincloud_agent_service.observability.trace import (
+    append_trace_event,
+    build_request_summary,
+    traced_async_node,
+    traced_node,
+)
 from chaincloud_agent_service.tools.registry import get_tools
 
 
@@ -236,7 +242,7 @@ def compile_agent_graph(
             requested_mode=state.get("requested_mode", "auto"),
             conversation_context=_planning_context(messages),
         )
-        return {
+        update: dict[str, Any] = {
             "execution_mode": decision.mode,
             "route_reason": decision.reason,
             "route_confidence": decision.confidence,
@@ -272,6 +278,13 @@ def compile_agent_graph(
             "status": "planning" if decision.mode == "planned" else "executing",
             "failure_reason": None,
         }
+        append_trace_event(state, update, "decision_events", {
+            "trace_id": state.get("trace_id"), "thread_id": state.get("trace_thread_id"),
+            "decision_type": "router", "action": decision.mode,
+            "reason": decision.reason, "confidence": decision.confidence,
+            "source": decision.source,
+        })
+        return update
 
     def router_route(state: AgentState) -> str:
         return state.get("execution_mode", "planned")
@@ -422,6 +435,19 @@ def compile_agent_graph(
             )
         else:
             update.update(status="executing", failure_reason=None)
+        append_trace_event(state, update, "decision_events", {
+            "trace_id": state.get("trace_id"), "thread_id": state.get("trace_thread_id"),
+            "decision_type": "permission_gate", "action": decision.action.lower(),
+            "risk_level": getattr(decision, "risk_level", None), "reason": decision.reason,
+            "step_id": current_step_id,
+        })
+        if decision.action == "DENY":
+            append_trace_event(state, update, "error_events", {
+                "trace_id": state.get("trace_id"),
+                "thread_id": state.get("trace_thread_id"),
+                "source": "permission_gate", "step_id": current_step_id,
+                "error_type": "permission_denied", "retryable": False,
+            })
         return update
 
     def permission_gate_route(state: AgentState) -> str:
@@ -509,7 +535,15 @@ def compile_agent_graph(
         else:
             mode_remaining = MAX_STEP_TOOL_CALLS - state.get("step_tool_call_count", 0)
         remaining = min(global_remaining, max(0, mode_remaining))
-        result = tool_node.invoke(state, remaining_budget=remaining)
+        fallback_tools: set[str] = set()
+        if state.get("execution_mode") == "planned" and state.get("current_step_id"):
+            plan = _plan_from_state(state)
+            step = next(item for item in plan.steps if item.id == state.get("current_step_id"))
+            fallback_tools = set(step.fallback_tools)
+        result = tool_node.invoke(
+            state, remaining_budget=remaining, step_id=state.get("current_step_id"),
+            fallback_tools=fallback_tools,
+        )
         attempts = int(result.get("attempts", 0))
         errors = [
             payload for message in result.get("messages", [])
@@ -519,7 +553,20 @@ def compile_agent_graph(
             "messages": result.get("messages", []),
             "tool_call_count": state.get("tool_call_count", 0) + attempts,
             "last_tool_errors": errors,
+            "tool_events": [*state.get("tool_events", []), *result.get("tool_events", [])],
         }
+        new_error_events = [
+            {
+                "trace_id": state.get("trace_id"),
+                "thread_id": state.get("trace_thread_id"),
+                "source": "tool", "tool_name": event.get("tool_name"),
+                "step_id": event.get("step_id"), "error_type": event.get("error_type"),
+                "retryable": event.get("retryable"),
+            }
+            for event in result.get("tool_events", []) if event.get("status") == "error"
+        ]
+        if new_error_events:
+            update["error_events"] = [*state.get("error_events", []), *new_error_events]
         if state.get("execution_mode") == "direct":
             update["direct_tool_call_count"] = (
                 state.get("direct_tool_call_count", 0) + attempts
@@ -679,6 +726,19 @@ def compile_agent_graph(
                 status=("degraded" if action == "partial" and not step.critical else ("partial" if action == "partial" else "failed")),
                 failure_reason=decision.reason,
             )
+        append_trace_event(state, update, "decision_events", {
+            "trace_id": state.get("trace_id"), "thread_id": state.get("trace_thread_id"),
+            "decision_type": "evaluator", "action": action,
+            "reason": decision.feedback or decision.reason, "step_id": current_step_id,
+        })
+        if action in {"partial", "fail"}:
+            append_trace_event(state, update, "error_events", {
+                "trace_id": state.get("trace_id"),
+                "thread_id": state.get("trace_thread_id"),
+                "source": "evaluator", "step_id": current_step_id,
+                "error_type": "step_partial" if action == "partial" else "step_failed",
+                "retryable": False,
+            })
         return update
 
     def evaluator_route(state: AgentState) -> str:
@@ -782,6 +842,9 @@ def compile_agent_graph(
             "review_attempts": state.get("review_attempts", 0) + 1,
         }
 
+    def execution_completed_node(state: AgentState) -> dict[str, Any]:
+        return {"request_summary": build_request_summary(state)}
+
     def reviewer_route(state: AgentState) -> str:
         if (
             state.get("review_action") == "revise"
@@ -792,25 +855,26 @@ def compile_agent_graph(
 
     builder = StateGraph(AgentState)
     builder.add_node("prepare_request", prepare_request_node)
-    builder.add_node("router", router_node)
-    builder.add_node("direct_agent", direct_agent_node)
+    builder.add_node("router", traced_node("router", router_node))
+    builder.add_node("direct_agent", traced_node("direct_agent", direct_agent_node))
     builder.add_node("complete_direct", complete_direct_node)
-    builder.add_node("planner", planner_node)
-    builder.add_node("select_step", select_step_node)
-    builder.add_node("permission_gate", permission_gate_node)
+    builder.add_node("planner", traced_node("planner", planner_node))
+    builder.add_node("select_step", traced_node("select_step", select_step_node))
+    builder.add_node("permission_gate", traced_node("permission_gate", permission_gate_node))
     builder.add_node("state_validation", state_validation_node)
     builder.add_node("blocked_missing_state", blocked_missing_state_node)
-    builder.add_node("executor", executor_node)
+    builder.add_node("executor", traced_node("executor", executor_node))
     builder.add_node("complete_step", complete_step_node)
-    builder.add_node("evaluator", evaluator_node)
-    builder.add_node("replan", replan_node)
+    builder.add_node("evaluator", traced_node("evaluator", evaluator_node))
+    builder.add_node("replan", traced_node("replan", replan_node))
     builder.add_node("budget_exceeded", budget_exceeded_node)
     builder.add_node("permission_failure", permission_failure_node)
     builder.add_node("review_gate", review_gate_node)
-    builder.add_node("compose_answer", compose_answer_node)
-    builder.add_node("reviewer", reviewer_node)
+    builder.add_node("compose_answer", traced_async_node("compose_answer", compose_answer_node))
+    builder.add_node("reviewer", traced_node("reviewer", reviewer_node))
+    builder.add_node("execution_completed", execution_completed_node)
     if tools:
-        builder.add_node("tools", tools_node)
+        builder.add_node("tools", traced_node("tools", tools_node))
 
     builder.add_edge(START, "prepare_request")
     builder.add_conditional_edges(
@@ -847,7 +911,7 @@ def compile_agent_graph(
     builder.add_conditional_edges(
         "permission_gate",
         permission_gate_route,
-        {"validate": "state_validation", "finish": END},
+        {"validate": "state_validation", "finish": "execution_completed"},
     )
     builder.add_conditional_edges(
         "state_validation",
@@ -857,7 +921,7 @@ def compile_agent_graph(
     builder.add_conditional_edges(
         "blocked_missing_state",
         blocked_missing_state_route,
-        {"wait": END, "finish": "review_gate"},
+        {"wait": "execution_completed", "finish": "review_gate"},
     )
     executor_destinations = {
         "complete_step": "complete_step",
@@ -872,7 +936,7 @@ def compile_agent_graph(
             tools_route,
             {"direct": "direct_agent", "planned": "executor", "permission_failure": "permission_failure"},
         )
-        builder.add_edge("permission_failure", END)
+        builder.add_edge("permission_failure", "execution_completed")
     builder.add_edge("budget_exceeded", "review_gate")
     builder.add_edge("complete_step", "evaluator")
     builder.add_conditional_edges(
@@ -890,11 +954,12 @@ def compile_agent_graph(
     builder.add_conditional_edges(
         "compose_answer",
         after_compose_route,
-        {"review": "reviewer", "end": END},
+        {"review": "reviewer", "end": "execution_completed"},
     )
     builder.add_conditional_edges(
         "reviewer",
         reviewer_route,
-        {"revise": "compose_answer", "end": END},
+        {"revise": "compose_answer", "end": "execution_completed"},
     )
+    builder.add_edge("execution_completed", END)
     return builder.compile(checkpointer=checkpointer)

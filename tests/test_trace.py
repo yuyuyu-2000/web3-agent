@@ -1,4 +1,9 @@
-from chaincloud_agent_service.observability.trace import extract_agent_trace
+from chaincloud_agent_service.observability.trace import (
+    build_request_summary,
+    execution_trace_from_state,
+    extract_agent_trace,
+    new_execution_context,
+)
 
 
 class DummyAIMessage:
@@ -129,3 +134,33 @@ def test_extract_agent_trace_with_invalid_tool_call():
     assert trace[0].type == "invalid_tool_call"
     assert trace[0].tool == "postgres_select"
     assert "invalid tool call" in trace[0].error_preview
+
+
+def test_execution_trace_summary_uses_unified_event_buckets():
+    state = {
+        **new_execution_context("thread-1"),
+        "status": "degraded",
+        "node_events": [
+            {"node_name": "router", "duration_ms": 1},
+            {"node_name": "executor", "duration_ms": 2},
+        ],
+        "tool_events": [
+            {"tool_call_id": "call-1", "attempt": 1, "status": "error"},
+            {"tool_call_id": "call-1", "attempt": 2, "status": "success", "recovered": True},
+        ],
+        "decision_events": [
+            {"decision_type": "permission_gate", "action": "allow"},
+            {"decision_type": "evaluator", "action": "retry"},
+        ],
+        "error_events": [{"source": "tool", "error_type": "timeout"}],
+    }
+    summary = build_request_summary(state)
+    trace = execution_trace_from_state({**state, "request_summary": summary})
+
+    assert trace["trace_id"] == state["trace_id"]
+    assert summary["tool_calls"] == 1
+    assert summary["tool_retries"] == 1
+    assert summary["step_retries"] == 1
+    assert summary["permission_checks"] == 1
+    assert summary["errors"] == 1
+    assert summary["final_status"] == "degraded"
