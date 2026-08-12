@@ -24,7 +24,9 @@ JSON 格式：
       "success_criteria": "如何判断本步骤完成",
       "suggested_tools": ["工具名称"],
       "depends_on": [],
-      "requires_confirmation": false
+      "requires_confirmation": false,
+      "critical": true,
+      "fallback_tools": []
     }
   ]
 }
@@ -34,6 +36,7 @@ JSON 格式：
 3. 只能引用提供的工具名称；不确定时 suggested_tools 使用空数组。
 4. Planner 不执行工具，也不直接回答用户问题。
 5. 创建、修改外部状态的步骤必须设置 requires_confirmation=true。
+6. critical 表示缺失该步骤结果是否会使目标无法可靠完成；有等价降级工具时写入 fallback_tools。
 """
 
 

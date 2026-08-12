@@ -35,6 +35,8 @@ class AgentState(TypedDict):
     planner_attempts: NotRequired[int]
     replanning_count: NotRequired[int]
     tool_call_count: NotRequired[int]
+    last_tool_errors: NotRequired[list[dict[str, Any]]]
+    permission_failure: NotRequired[dict[str, Any] | None]
     direct_tool_call_count: NotRequired[int]
     step_tool_call_count: NotRequired[int]
     step_retry_count: NotRequired[int]
@@ -53,6 +55,7 @@ class AgentState(TypedDict):
             "executing",
             "completed",
             "partial",
+            "degraded",
             "failed",
             "waiting_confirmation",
             "permission_denied",

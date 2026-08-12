@@ -12,6 +12,8 @@ class PlanStep(BaseModel):
     suggested_tools: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     requires_confirmation: bool = False
+    critical: bool = True
+    fallback_tools: list[str] = Field(default_factory=list)
 
 
 class Plan(BaseModel):
@@ -26,4 +28,3 @@ class StepResult(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     tool_calls: list[str] = Field(default_factory=list)
     error: str | None = None
-

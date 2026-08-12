@@ -9,7 +9,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
 
 from chaincloud_agent_service.agent.answer_composer import acompose_final_answer
 from chaincloud_agent_service.agent.evaluation import evaluate_step
@@ -20,14 +19,13 @@ from chaincloud_agent_service.agent.routing import decide_route
 from chaincloud_agent_service.agent.schema_context import build_agent_system_prompt
 from chaincloud_agent_service.agent.state import AgentState
 from chaincloud_agent_service.agent.state_validation import validate_step_state
+from chaincloud_agent_service.agent.tool_recovery import RecoveringToolNode, parse_tool_error
 from chaincloud_agent_service.config import Settings
 from chaincloud_agent_service.tools.registry import get_tools
 
 
-MAX_TOOL_CALLS = 12
 MAX_STEP_TOOL_CALLS = 4
 MAX_DIRECT_TOOL_CALLS = 4
-MAX_STEP_RETRIES = 2
 MAX_REPLANS = 1
 MAX_REVIEW_ATTEMPTS = 2
 
@@ -121,6 +119,8 @@ def _step_execution_prompt(state: AgentState) -> str:
         f"当前步骤目标：{step.objective}\n"
         f"成功标准：{step.success_criteria}\n"
         f"建议工具：{', '.join(step.suggested_tools) or '由你按需选择'}\n"
+        f"步骤重要性：{'关键' if step.critical else '非关键'}\n"
+        f"允许的 fallback 工具：{', '.join(step.fallback_tools) or '无'}\n"
         f"依赖步骤结果：{json.dumps(dependencies, ensure_ascii=False)}\n"
         f"用户补充的执行状态：{json.dumps(state.get('clarified_state', {}), ensure_ascii=False)}\n"
         f"本步骤剩余工具调用额度：{MAX_STEP_TOOL_CALLS - state.get('step_tool_call_count', 0)}\n"
@@ -160,7 +160,10 @@ def compile_agent_graph(
         max_retries=settings.openai_max_retries,
     )
     executor_model = base_model.bind_tools(tools) if tools else base_model
-    tool_node = ToolNode(tools) if tools else None
+    max_tool_retries = int(getattr(settings, "max_tool_retries", 2))
+    max_step_retries = int(getattr(settings, "max_step_retries", 2))
+    max_total_tool_calls = int(getattr(settings, "max_total_tool_calls", 12))
+    tool_node = RecoveringToolNode(tools, max_retries=max_tool_retries) if tools else None
 
     def prepare_request_node(state: AgentState) -> dict[str, Any]:
         goal = _latest_user_question(list(state["messages"]))
@@ -254,6 +257,8 @@ def compile_agent_graph(
             "planner_attempts": 0,
             "replanning_count": 0,
             "tool_call_count": 0,
+            "last_tool_errors": [],
+            "permission_failure": None,
             "direct_tool_call_count": 0,
             "step_tool_call_count": 0,
             "step_retry_count": 0,
@@ -295,6 +300,8 @@ def compile_agent_graph(
             "step_message_start": len(state["messages"]),
             "planner_attempts": attempts,
             "tool_call_count": 0,
+            "last_tool_errors": [],
+            "permission_failure": None,
             "direct_tool_call_count": 0,
             "step_tool_call_count": 0,
             "step_retry_count": 0,
@@ -337,9 +344,14 @@ def compile_agent_graph(
     def complete_direct_node(state: AgentState) -> dict[str, Any]:
         messages = list(state["messages"])
         summary = _message_text(messages[-1]) if messages else ""
+        unresolved_errors = state.get("last_tool_errors", [])
         return {
-            "status": "completed" if summary else "failed",
-            "failure_reason": None if summary else "直接执行没有生成有效结果",
+            "status": "partial" if unresolved_errors else ("completed" if summary else "failed"),
+            "failure_reason": (
+                "工具失败后未获得可靠替代结果"
+                if unresolved_errors
+                else (None if summary else "直接执行没有生成有效结果")
+            ),
         }
 
     def select_step_node(state: AgentState) -> dict[str, Any]:
@@ -360,6 +372,7 @@ def compile_agent_graph(
                 "step_retry_count": 0,
                 "evaluation_action": None,
                 "evaluation_feedback": None,
+                "last_tool_errors": [],
                 "step_message_start": len(state["messages"]),
                 "clarified_state": {},
                 "state_validation": None,
@@ -457,6 +470,13 @@ def compile_agent_graph(
                 "\n上一次 Evaluator 反馈："
                 f"{state['evaluation_feedback']}\n请针对反馈修正本次执行结果。"
             )
+        if state.get("last_tool_errors"):
+            execution_prompt += (
+                "\n最近工具错误（结构化事实）："
+                f"{json.dumps(state['last_tool_errors'], ensure_ascii=False)}\n"
+                "仅瞬时错误由工具层自动重试。请做语义修复：可修正参数、补充查询或使用计划声明的 fallback。"
+                "权限/guardrail 错误严禁用等价工具绕过；缺少关键结果时不得编造。"
+            )
         combined_prompt = "\n\n---\n\n".join(
             part for part in (system_prompt, execution_prompt) if part
         )
@@ -475,7 +495,7 @@ def compile_agent_graph(
             return "complete_step"
         if not tools:
             return "budget_exceeded"
-        if state.get("tool_call_count", 0) + len(calls) > MAX_TOOL_CALLS:
+        if state.get("tool_call_count", 0) + len(calls) > max_total_tool_calls:
             return "budget_exceeded"
         if state.get("step_tool_call_count", 0) + len(calls) > MAX_STEP_TOOL_CALLS:
             return "budget_exceeded"
@@ -483,32 +503,70 @@ def compile_agent_graph(
 
     def tools_node(state: AgentState) -> dict[str, Any]:
         assert tool_node is not None
-        messages = list(state["messages"])
-        count = len(_tool_calls(messages[-1])) if messages else 0
-        result = tool_node.invoke(state)
+        global_remaining = max(0, max_total_tool_calls - state.get("tool_call_count", 0))
+        if state.get("execution_mode") == "direct":
+            mode_remaining = MAX_DIRECT_TOOL_CALLS - state.get("direct_tool_call_count", 0)
+        else:
+            mode_remaining = MAX_STEP_TOOL_CALLS - state.get("step_tool_call_count", 0)
+        remaining = min(global_remaining, max(0, mode_remaining))
+        result = tool_node.invoke(state, remaining_budget=remaining)
+        attempts = int(result.get("attempts", 0))
+        errors = [
+            payload for message in result.get("messages", [])
+            if (payload := parse_tool_error(message)) is not None
+        ]
         update: dict[str, Any] = {
             "messages": result.get("messages", []),
-            "tool_call_count": state.get("tool_call_count", 0) + count,
+            "tool_call_count": state.get("tool_call_count", 0) + attempts,
+            "last_tool_errors": errors,
         }
         if state.get("execution_mode") == "direct":
             update["direct_tool_call_count"] = (
-                state.get("direct_tool_call_count", 0) + count
+                state.get("direct_tool_call_count", 0) + attempts
             )
         else:
             update["step_tool_call_count"] = (
-                state.get("step_tool_call_count", 0) + count
+                state.get("step_tool_call_count", 0) + attempts
             )
         return update
 
     def tools_route(state: AgentState) -> str:
+        permission_error = next(
+            (item for item in state.get("last_tool_errors", []) if item.get("permission_error")),
+            None,
+        )
+        if permission_error:
+            return "permission_failure"
         return "direct" if state.get("execution_mode") == "direct" else "planned"
+
+    def permission_failure_node(state: AgentState) -> dict[str, Any]:
+        error = next(
+            (item for item in state.get("last_tool_errors", []) if item.get("permission_error")),
+            {"message": "工具权限被拒绝"},
+        )
+        return {
+            "permission_failure": error,
+            "status": "permission_denied",
+            "failure_reason": str(error.get("message") or "工具权限被拒绝"),
+        }
 
     def budget_exceeded_node(state: AgentState) -> dict[str, Any]:
         messages = list(state["messages"])
         calls = _tool_calls(messages[-1]) if messages else []
         rejected = [
             ToolMessage(
-                content="工具调用预算已达到上限，本次调用未执行。",
+                content=json.dumps(
+                    {
+                        "status": "error",
+                        "tool": str(_call_field(call, "name") or "unknown_tool"),
+                        "error_type": "budget_exhausted",
+                        "retryable": False,
+                        "permission_error": False,
+                        "message": "工具调用预算已达到上限，本次调用未执行。",
+                        "attempts": 0,
+                    },
+                    ensure_ascii=False,
+                ),
                 tool_call_id=str(_call_field(call, "id") or f"rejected-{index}"),
                 name=str(_call_field(call, "name") or "unknown_tool"),
             )
@@ -532,6 +590,20 @@ def compile_agent_graph(
             if isinstance(message, ToolMessage)
             or getattr(message, "type", None) == "tool"
         ]
+        latest_by_tool: dict[str, dict[str, Any] | None] = {}
+        for message in tool_messages:
+            latest_by_tool[str(getattr(message, "name", None) or "unknown_tool")] = parse_tool_error(message)
+        unresolved_errors = [item for item in latest_by_tool.values() if item is not None]
+        plan = _plan_from_state(state)
+        step = next(item for item in plan.steps if item.id == current_step_id)
+        fallback_succeeded = any(
+            name in step.fallback_tools and payload is None
+            for name, payload in latest_by_tool.items()
+        )
+        if fallback_succeeded:
+            unresolved_errors = []
+        if unresolved_errors:
+            status = "failed" if step.critical else "partial"
         result = StepResult(
             step_id=current_step_id,
             status=status,
@@ -541,7 +613,7 @@ def compile_agent_graph(
                 str(getattr(message, "name", None) or "unknown_tool")
                 for message in tool_messages
             ],
-            error=None if summary else "empty executor response",
+            error=(json.dumps(unresolved_errors, ensure_ascii=False) if unresolved_errors else (None if summary else "empty executor response")),
         )
         return {"candidate_step_result": result.model_dump()}
 
@@ -554,8 +626,20 @@ def compile_agent_graph(
         retry_count = state.get("step_retry_count", 0)
         replan_count = state.get("replanning_count", 0)
         action = decision.action
-        if action == "retry" and retry_count >= MAX_STEP_RETRIES:
+        if not step.critical and candidate.status == "partial":
             action = "partial"
+            decision.feedback = "非关键步骤失败，保留已有可靠结果并以 degraded 状态结束"
+        if action == "pass" and candidate.status != "success":
+            if candidate.status == "failed" and retry_count < max_step_retries:
+                action = "retry"
+                decision.feedback = (
+                    f"关键工具结果仍缺失。"
+                    f"{'请尝试 fallback：' + ', '.join(step.fallback_tools) if step.fallback_tools else '请修正参数或确认无法继续，禁止编造结果。'}"
+                )
+            else:
+                action = "fail" if step.critical else "partial"
+        if action == "retry" and retry_count >= max_step_retries:
+            action = "fail" if step.critical and candidate.status == "failed" else "partial"
             decision.feedback = "步骤已达到最大重试次数"
         if action == "replan" and replan_count >= MAX_REPLANS:
             action = "partial"
@@ -592,7 +676,7 @@ def compile_agent_graph(
             update.update(
                 step_results=[*state.get("step_results", []), accepted.model_dump()],
                 candidate_step_result=None,
-                status="partial" if action == "partial" else "failed",
+                status=("degraded" if action == "partial" and not step.critical else ("partial" if action == "partial" else "failed")),
                 failure_reason=decision.reason,
             )
         return update
@@ -721,6 +805,7 @@ def compile_agent_graph(
     builder.add_node("evaluator", evaluator_node)
     builder.add_node("replan", replan_node)
     builder.add_node("budget_exceeded", budget_exceeded_node)
+    builder.add_node("permission_failure", permission_failure_node)
     builder.add_node("review_gate", review_gate_node)
     builder.add_node("compose_answer", compose_answer_node)
     builder.add_node("reviewer", reviewer_node)
@@ -785,8 +870,9 @@ def compile_agent_graph(
         builder.add_conditional_edges(
             "tools",
             tools_route,
-            {"direct": "direct_agent", "planned": "executor"},
+            {"direct": "direct_agent", "planned": "executor", "permission_failure": "permission_failure"},
         )
+        builder.add_edge("permission_failure", END)
     builder.add_edge("budget_exceeded", "review_gate")
     builder.add_edge("complete_step", "evaluator")
     builder.add_conditional_edges(

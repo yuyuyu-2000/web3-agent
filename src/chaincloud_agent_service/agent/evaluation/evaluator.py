@@ -22,6 +22,10 @@ EVALUATOR_SYSTEM_PROMPT = """你是任务步骤 Evaluator。判断执行结果�
 - replan：当前步骤或后续路径已不适用，需要重新规划剩余任务。
 - partial：已有可靠结果，但受数据、预算或外部限制无法完全完成。
 - fail：没有可靠结果且继续执行无意义。
+- 工具成功不等于步骤成功，必须逐项核对 success_criteria。
+- 网络瞬时错误由 ToolNode 处理，不要因此要求机械重试；retry 只用于步骤目标未满足且可通过语义修复继续。
+- candidate_result.error 表示仍未解决的工具失败。关键步骤无 fallback 时必须 fail；非关键步骤可 partial。
+- 权限或 guardrail 拒绝不得建议通过等价工具绕过。
 不要补充结果中不存在的事实，不要回答用户问题。
 """
 
@@ -78,4 +82,3 @@ def evaluate_step(
             feedback="",
             confidence=0.0,
         )
-

@@ -30,6 +30,12 @@ def validate_plan(plan: Plan, available_tools: set[str]) -> Plan:
                 f"步骤 {step.id} 引用了不存在的工具: "
                 f"{', '.join(sorted(unknown_tools))}"
             )
+        unknown_fallbacks = set(step.fallback_tools) - available_tools
+        if unknown_fallbacks:
+            raise PlanValidationError(
+                f"步骤 {step.id} 引用了不存在的 fallback 工具: "
+                f"{', '.join(sorted(unknown_fallbacks))}"
+            )
 
     dependencies = {step.id: set(step.depends_on) for step in plan.steps}
     remaining = set(ids)
@@ -42,4 +48,3 @@ def validate_plan(plan: Plan, available_tools: set[str]) -> Plan:
         remaining -= ready
 
     return plan
-

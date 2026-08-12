@@ -63,6 +63,9 @@ class Settings:
     auth_postgres_auto_create: bool
     auth_token_secret: str
     auth_token_expire_minutes: int
+    max_tool_retries: int = 2
+    max_step_retries: int = 2
+    max_total_tool_calls: int = 12
 
 
 def load_settings() -> Settings:
@@ -125,6 +128,17 @@ def load_settings() -> Settings:
         openai_max_retries = 0
     if openai_max_retries > 5:
         openai_max_retries = 5
+
+    def bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(os.environ.get(name, str(default)).strip() or str(default))
+        except ValueError:
+            value = default
+        return min(max(value, minimum), maximum)
+
+    max_tool_retries = bounded_int("MAX_TOOL_RETRIES", 2, 0, 10)
+    max_step_retries = bounded_int("MAX_STEP_RETRIES", 2, 0, 10)
+    max_total_tool_calls = bounded_int("MAX_TOTAL_TOOL_CALLS", 12, 1, 100)
     token = os.environ.get("CHAT_API_TOKEN", "").strip()
     web_search_enabled = os.environ.get("WEB_SEARCH_ENABLED", "0").strip().lower() in (
         "1",
@@ -244,4 +258,7 @@ def load_settings() -> Settings:
         auth_postgres_auto_create=auth_postgres_auto_create,
         auth_token_secret=auth_token_secret,
         auth_token_expire_minutes=auth_token_expire_minutes,
+        max_tool_retries=max_tool_retries,
+        max_step_retries=max_step_retries,
+        max_total_tool_calls=max_total_tool_calls,
     )
