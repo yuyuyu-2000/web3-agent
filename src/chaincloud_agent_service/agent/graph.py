@@ -346,7 +346,7 @@ def compile_agent_graph(
         summary = _message_text(messages[-1]) if messages else ""
         unresolved_errors = state.get("last_tool_errors", [])
         return {
-            "status": "partial" if unresolved_errors else ("completed" if summary else "failed"),
+            "status": "degraded" if unresolved_errors else ("completed" if summary else "failed"),
             "failure_reason": (
                 "工具失败后未获得可靠替代结果"
                 if unresolved_errors
@@ -574,7 +574,7 @@ def compile_agent_graph(
         ]
         return {
             "messages": rejected,
-            "status": "partial",
+            "status": "degraded",
             "failure_reason": "工具调用预算已达到上限",
         }
 

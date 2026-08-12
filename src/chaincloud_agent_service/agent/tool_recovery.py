@@ -104,6 +104,38 @@ def parse_tool_error(message: Any) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) and payload.get("status") == "error" else None
 
 
+def _returned_error(value: Any) -> dict[str, Any] | None:
+    payload = value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return payload if isinstance(payload, dict) and payload.get("status") == "error" else None
+
+
+def _classify_returned_error(payload: dict[str, Any]) -> ClassifiedToolError:
+    error_type = str(payload.get("error_type") or "").strip().lower()
+    permission_error = bool(payload.get("permission_error")) or error_type in {
+        "permission_error",
+        "permission_denied",
+        "guardrail_rejected",
+    }
+    if permission_error:
+        return ClassifiedToolError("permission_error", False, True)
+    if error_type in {
+        "timeout",
+        "rate_limit",
+        "service_unavailable",
+        "connection_error",
+    }:
+        return ClassifiedToolError(error_type, True)
+    classified = classify_tool_error(RuntimeError(str(payload.get("message") or payload)))
+    if classified.error_type != "tool_error":
+        return classified
+    return ClassifiedToolError(error_type or "tool_error", bool(payload.get("retryable")))
+
+
 class RecoveringToolNode:
     """A ToolNode-compatible synchronous node that retries only transient failures."""
 
@@ -173,6 +205,29 @@ class RecoveringToolNode:
                     if tool is None:
                         raise ValueError(f"unknown tool: {name}")
                     value = tool.invoke(args)
+                    returned_error = _returned_error(value)
+                    if returned_error is not None:
+                        classified = _classify_returned_error(returned_error)
+                        if classified.retryable and attempts <= self.max_retries:
+                            delay = self.backoff_base_sec * (2 ** (attempts - 1))
+                            self.sleeper(delay * (0.5 + self.random_fn()))
+                            continue
+                        payload = self._error_payload(
+                            name,
+                            classified.error_type,
+                            classified.retryable,
+                            str(returned_error.get("message") or "工具返回错误状态"),
+                            attempts,
+                            classified.permission_error,
+                        )
+                        results.append(
+                            ToolMessage(
+                                content=json.dumps(payload, ensure_ascii=False),
+                                tool_call_id=call_id,
+                                name=name,
+                            )
+                        )
+                        break
                     content = (
                         value
                         if isinstance(value, str)

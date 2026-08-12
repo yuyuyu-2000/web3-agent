@@ -56,6 +56,9 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    status: str | None = None
+    failure_reason: str | None = None
+    failed_tools: list[dict[str, Any]] | None = None
     trace: list[ChatTraceEvent] | None = None
     permission_required: dict[str, Any] | None = None
     clarification_required: dict[str, Any] | None = None
@@ -79,6 +82,18 @@ def _ndjson_event(event_type: str, **payload: Any) -> bytes:
     return (json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n").encode(
         "utf-8"
     )
+
+
+def _result_metadata(result: dict[str, Any]) -> dict[str, Any]:
+    failed_tools = list(result.get("last_tool_errors") or [])
+    permission_failure = result.get("permission_failure")
+    if isinstance(permission_failure, dict) and permission_failure not in failed_tools:
+        failed_tools.append(permission_failure)
+    return {
+        "status": result.get("status"),
+        "failure_reason": result.get("failure_reason"),
+        "failed_tools": failed_tools or None,
+    }
 
 
 class _IncrementalReasoningStripper:
@@ -321,8 +336,9 @@ async def chat(
         return ChatResponse(
             reply=text,
             trace=extract_agent_trace(messages, max_preview_chars=body.trace_max_chars),
+            **_result_metadata(result),
         )
-    return ChatResponse(reply=text)
+    return ChatResponse(reply=text, **_result_metadata(result))
 
 
 @router.post(
@@ -394,7 +410,7 @@ async def approve_permission(
         _message_content_to_text(getattr(last, "content", "") if last else "")
     )
     text = _append_chart_urls(text, _extract_chart_urls(messages))
-    return ChatResponse(reply=text)
+    return ChatResponse(reply=text, **_result_metadata(result))
 
 
 @router.post(
@@ -453,7 +469,7 @@ async def submit_clarification(
         _message_content_to_text(getattr(last, "content", "") if last else "")
     )
     text = _append_chart_urls(text, _extract_chart_urls(messages))
-    return ChatResponse(reply=text)
+    return ChatResponse(reply=text, **_result_metadata(result))
 
 
 @router.post("/chat/stream")
@@ -475,6 +491,7 @@ async def chat_stream(
         awaiting_permission = False
         permission_halted = False
         awaiting_clarification = False
+        final_metadata: dict[str, Any] = {}
         stripper = _IncrementalReasoningStripper()
         yield _ndjson_event("status", content="正在思考...")
 
@@ -505,6 +522,9 @@ async def chat_stream(
                     continue
                 for node_name, update in data.items():
                     if isinstance(update, dict):
+                        for key in ("status", "failure_reason", "last_tool_errors", "permission_failure"):
+                            if key in update:
+                                final_metadata[key] = update[key]
                         node_messages = update.get("messages", [])
                         if not isinstance(node_messages, list):
                             node_messages = [node_messages]
@@ -618,7 +638,7 @@ async def chat_stream(
             if buffer_for_review and reply:
                 streamed_reply = reply
                 yield _ndjson_event("delta", content=reply)
-            payload: dict[str, Any] = {"reply": reply}
+            payload: dict[str, Any] = {"reply": reply, **_result_metadata(final_metadata)}
             if body.debug:
                 payload["trace"] = [
                     event.model_dump(exclude_none=True)
