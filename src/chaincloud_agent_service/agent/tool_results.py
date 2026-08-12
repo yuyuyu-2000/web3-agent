@@ -12,11 +12,6 @@ from typing import Any, Protocol
 
 from langchain_core.messages import ToolMessage
 
-from chaincloud_agent_service.agent.answer_composer.evidence import (
-    classify_tool_evidence_level,
-)
-
-
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -172,6 +167,10 @@ def process_tool_result(*, store: ToolResultStore, tool_name: str,
                         tool_args: dict[str, Any], raw_content: str,
                         threshold_bytes: int, preview_chars: int,
                         error: dict[str, Any] | None = None) -> tuple[ToolMessage, dict[str, Any]]:
+    # Lazy import avoids a cycle: ContextBuilder -> tool_results -> answer_composer.
+    from chaincloud_agent_service.agent.answer_composer.evidence import (
+        classify_tool_evidence_level,
+    )
     evidence = classify_tool_evidence_level(tool_name).value
     raw = store.save(tool_name=tool_name, tool_args=tool_args, raw_content=raw_content,
                      evidence_source=evidence)

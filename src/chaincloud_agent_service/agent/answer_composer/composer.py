@@ -19,6 +19,7 @@ from chaincloud_agent_service.agent.answer_composer.renderer import (
     build_fallback_answer,
     message_content_to_text,
 )
+from chaincloud_agent_service.agent.rolling_summary import is_context_length_error
 
 
 def _last_ai_text(messages: list[Any]) -> str:
@@ -65,7 +66,8 @@ def compose_final_answer(model: Any, messages: list[Any]) -> AIMessage:
 
 
 async def acompose_final_answer(
-    model: Any, messages: list[Any], *, model_messages: list[Any] | None = None
+    model: Any, messages: list[Any], *, model_messages: list[Any] | None = None,
+    propagate_context_errors: bool = False,
 ) -> AIMessage:
     """Generate the final answer through the model's native async token stream."""
     draft = _last_ai_text(messages)
@@ -74,9 +76,13 @@ async def acompose_final_answer(
     try:
         async for chunk in model.astream(model_messages or _build_composer_messages(messages)):
             parts.append(message_content_to_text(getattr(chunk, "content", "")))
-    except OpenAIError:
+    except OpenAIError as exc:
+        if propagate_context_errors and is_context_length_error(exc):
+            raise
         parts = []
-    except Exception:
+    except Exception as exc:
+        if propagate_context_errors and is_context_length_error(exc):
+            raise
         parts = []
 
     text = "".join(parts).strip()

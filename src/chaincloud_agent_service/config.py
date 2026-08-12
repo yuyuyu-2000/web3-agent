@@ -48,6 +48,11 @@ class Settings:
     tool_result_store_path: str
     tool_result_compression_threshold_bytes: int
     tool_result_preview_chars: int
+    rolling_summary_trigger_ratio: float
+    rolling_summary_recent_messages: int
+    rolling_summary_reactive_recent_messages: int
+    rolling_summary_max_input_tokens: int
+    rolling_summary_max_failures: int
     chat_api_token: str | None
     web_search_enabled: bool
     web_search_provider: str
@@ -170,6 +175,26 @@ def load_settings() -> Settings:
     tool_result_preview_chars = bounded_int(
         "TOOL_RESULT_PREVIEW_CHARS", 1000, 0, 10000
     )
+    try:
+        rolling_summary_trigger_ratio = float(
+            os.environ.get("ROLLING_SUMMARY_TRIGGER_RATIO", "0.70")
+        )
+    except ValueError:
+        rolling_summary_trigger_ratio = 0.70
+    rolling_summary_trigger_ratio = min(max(rolling_summary_trigger_ratio, 0.1), 0.95)
+    rolling_summary_recent_messages = bounded_int(
+        "ROLLING_SUMMARY_RECENT_MESSAGES", 12, 2, 200
+    )
+    rolling_summary_reactive_recent_messages = bounded_int(
+        "ROLLING_SUMMARY_REACTIVE_RECENT_MESSAGES", 4, 1, 100
+    )
+    rolling_summary_max_input_tokens = bounded_int(
+        "ROLLING_SUMMARY_MAX_INPUT_TOKENS", min(32000, max_input_tokens),
+        512, max_input_tokens,
+    )
+    rolling_summary_max_failures = bounded_int(
+        "ROLLING_SUMMARY_MAX_FAILURES", 3, 1, 10
+    )
     monitor_enabled = os.environ.get("MONITOR_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
     token = os.environ.get("CHAT_API_TOKEN", "").strip()
     web_search_enabled = os.environ.get("WEB_SEARCH_ENABLED", "0").strip().lower() in (
@@ -277,6 +302,11 @@ def load_settings() -> Settings:
         tool_result_store_path=tool_result_store_path,
         tool_result_compression_threshold_bytes=tool_result_compression_threshold_bytes,
         tool_result_preview_chars=tool_result_preview_chars,
+        rolling_summary_trigger_ratio=rolling_summary_trigger_ratio,
+        rolling_summary_recent_messages=rolling_summary_recent_messages,
+        rolling_summary_reactive_recent_messages=rolling_summary_reactive_recent_messages,
+        rolling_summary_max_input_tokens=rolling_summary_max_input_tokens,
+        rolling_summary_max_failures=rolling_summary_max_failures,
         chat_api_token=token or None,
         web_search_enabled=web_search_enabled,
         web_search_provider=web_search_provider,

@@ -11,6 +11,7 @@ from chaincloud_agent_service.agent.routing.models import (
     RouteDecision,
 )
 from chaincloud_agent_service.agent.routing.rules import route_by_rules
+from chaincloud_agent_service.agent.rolling_summary import is_context_length_error
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
@@ -93,7 +94,9 @@ def decide_route(
                 source="fallback",
             )
         return decision
-    except Exception:
+    except Exception as exc:
+        if is_context_length_error(exc):
+            raise
         return RouteDecision(
             mode="planned",
             reason="路由判断失败，保守使用规划模式",

@@ -207,3 +207,136 @@ ContextBuilder 不使用固定“最近 3 条”规则：
 
 所有工具摘要仍作为 ContextPart 进入统一 Token Budget。即使摘要总量过多，也会受到
 场景优先级和总输入预算约束。
+
+## 9. Rolling Summary
+
+Rolling Summary 是当前 `thread_id` 的活跃上下文压缩，不是长期 Memory。长期 Memory
+仍由 `memory_key`、MemoryStore 和显式召回管理；Rolling Summary 存在 LangGraph
+AgentState/checkpoint 中，只负责让同一线程长期运行时不再向模型重复发送全部历史。
+
+### 状态字段
+
+| 字段 | 用途 |
+| --- | --- |
+| `conversation_summary` | task-aware JSON 线程摘要 |
+| `summarized_message_ids` | 已覆盖消息的稳定 ID/指纹 |
+| `summarized_until` | 已覆盖的 append-only 消息前缀游标 |
+| `summary_version` | 每次成功压缩递增 |
+| `summary_updated_at` | 最近成功更新时间 |
+| `compact_failure_count` | 连续失败次数 |
+| `compact_events` | proactive/reactive 压缩 trace |
+
+完整 `messages` 不会被删除或替换，仍由 checkpoint 保存。模型活跃视图从
+`messages[summarized_until:]` 开始，并组合 `conversation_summary`。
+
+### 自动触发规则
+
+每次请求在 Router 之前检查：
+
+```text
+active_message_tokens >= MAX_INPUT_TOKENS * ROLLING_SUMMARY_TRIGGER_RATIO
+```
+
+默认比例为 0.70。此外，如果活跃消息加预计静态上下文达到输入上限的 90%，也会触发。
+判断使用与 ContextBuilder 相同的 token counter，不使用字符数。
+
+相关配置：
+
+| 配置 | 默认值 |
+| --- | ---: |
+| `ROLLING_SUMMARY_TRIGGER_RATIO` | 0.70 |
+| `ROLLING_SUMMARY_RECENT_MESSAGES` | 12 |
+| `ROLLING_SUMMARY_REACTIVE_RECENT_MESSAGES` | 4 |
+| `ROLLING_SUMMARY_MAX_INPUT_TOKENS` | 32000 |
+| `ROLLING_SUMMARY_MAX_FAILURES` | 3 |
+
+一次 proactive compact 最多发起一次摘要调用并推进一个安全前缀批次，避免单次请求产生
+无界摘要调用。后续请求仍超过阈值时会继续滚动推进。
+
+### Task-aware schema
+
+摘要必须输出以下 JSON 字段：
+
+```text
+current_goal
+confirmed_user_constraints
+important_entities
+important_numbers
+current_plan
+completed_steps
+pending_steps
+important_tool_findings
+failed_attempts
+unresolved_errors
+permissions_approvals
+clarified_state
+decisions_made
+open_questions
+```
+
+摘要输入同时包含旧 summary、待压缩消息以及当前 Plan、StepResult、错误、权限和
+clarified state。Prompt 明确禁止编造并要求完整保留地址、交易哈希、时间范围和数字。
+
+### 保留与归档边界
+
+正常 proactive compact：
+
+- 保留最近 12 条原始消息；
+- Planned Step 正在执行时，不越过 `step_message_start` 压缩当前步骤证据；
+- 较早安全前缀只进入 `conversation_summary`，原文仍在 checkpoint；
+- Tool Result Raw 文件、Structured Facts 和引用继续独立保留。
+
+reactive compact 更激进，通常只保留最近 4 条，但同样不会越过当前执行步骤的安全边界。
+ContextBuilder 的模型输入顺序为 System、长期 Memory、Rolling Summary、recent messages、
+当前请求/执行状态/必要 evidence；实际可选内容仍受统一优先级预算控制。
+其中 summary 内的目标、用户约束、实体、重要数字、权限、澄清状态和未解决错误会拆成
+受保护的 `summary_constraints`（优先级 5）；其余较早历史摘要保持优先级 8，可以在
+极端预算压力下被裁剪。
+
+### Reactive Compact
+
+Router、Planner/Replan、Direct Executor、Planned Executor、Answer Composer 和 Reviewer
+遇到以下错误时触发：
+
+```text
+context_length_exceeded
+maximum context length
+context window
+prompt too long
+too many tokens
+```
+
+流程为：
+
+```text
+第一次模型请求失败
+  -> reactive compact
+  -> 使用新 summary + 更小 recent window 重建 ContextBuilder
+  -> 重试一次
+  -> 再失败则向上抛出，不继续重试
+```
+
+### 失败保护
+
+摘要调用或 JSON/schema 校验失败时：
+
+- 不返回新的 `conversation_summary`，因此旧摘要不会被覆盖；
+- 不修改或删除 `messages`；
+- 增加 `compact_failure_count`；
+- 写入失败 compact event；
+- 连续失败达到默认 3 次后打开熔断器，不再调用摘要模型；
+- 任意一次成功会把失败计数归零。
+
+### Token 对比示例
+
+使用本地保守 token counter 测试 100 条较长中文历史消息：
+
+```text
+compact 前活跃历史：83,702 token
+task-aware summary + 最近 12 条：10,180 token
+下降：87.8%
+```
+
+这只是可重复的合成样例，实际降幅由消息长度、摘要内容、工具结果压缩比例和模型
+tokenizer 决定。每次真实压缩的 `active_tokens_before`、`active_tokens_after`、覆盖范围、
+版本和触发模式都会写入 `compact_events`。

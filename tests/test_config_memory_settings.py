@@ -63,3 +63,19 @@ def test_load_settings_tool_result_compression(monkeypatch):
     assert settings.tool_result_store_path == "tmp/results"
     assert settings.tool_result_compression_threshold_bytes == 4096
     assert settings.tool_result_preview_chars == 256
+
+
+def test_load_settings_rolling_summary(monkeypatch):
+    monkeypatch.setenv("ROLLING_SUMMARY_TRIGGER_RATIO", "0.6")
+    monkeypatch.setenv("ROLLING_SUMMARY_RECENT_MESSAGES", "10")
+    monkeypatch.setenv("ROLLING_SUMMARY_REACTIVE_RECENT_MESSAGES", "3")
+    monkeypatch.setenv("ROLLING_SUMMARY_MAX_INPUT_TOKENS", "2000")
+    monkeypatch.setenv("ROLLING_SUMMARY_MAX_FAILURES", "2")
+
+    settings = load_settings()
+
+    assert settings.rolling_summary_trigger_ratio == 0.6
+    assert settings.rolling_summary_recent_messages == 10
+    assert settings.rolling_summary_reactive_recent_messages == 3
+    assert settings.rolling_summary_max_input_tokens == 2000
+    assert settings.rolling_summary_max_failures == 2

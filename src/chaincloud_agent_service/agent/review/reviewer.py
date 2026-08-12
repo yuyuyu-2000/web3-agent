@@ -7,6 +7,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from chaincloud_agent_service.agent.review.models import ReviewDecision
+from chaincloud_agent_service.agent.rolling_summary import is_context_length_error
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
@@ -97,7 +98,9 @@ def review_answer(
             ]
         )
         return _parse_decision(_message_text(response))
-    except Exception:
+    except Exception as exc:
+        if is_context_length_error(exc):
+            raise
         return ReviewDecision(
             action="approve",
             reason="Reviewer 不可用，保留 Answer Composer 输出",

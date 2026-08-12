@@ -20,6 +20,11 @@ from chaincloud_agent_service.agent.planning.planner import PLANNER_SYSTEM_PROMP
 from chaincloud_agent_service.agent.permission import evaluate_step_permission
 from chaincloud_agent_service.agent.review import direct_requires_review, review_answer
 from chaincloud_agent_service.agent.review.reviewer import REVIEWER_SYSTEM_PROMPT
+from chaincloud_agent_service.agent.rolling_summary import (
+    RollingSummaryManager,
+    is_context_length_error,
+    reactive_compact_retry,
+)
 from chaincloud_agent_service.agent.routing import decide_route
 from chaincloud_agent_service.agent.routing.router import ROUTER_SYSTEM_PROMPT
 from chaincloud_agent_service.agent.schema_context import build_agent_system_prompt
@@ -170,6 +175,7 @@ def compile_agent_graph(
     }
     system_prompt = build_agent_system_prompt(settings)
     context_builder = ContextBuilder.from_settings(settings)
+    rolling_summary = RollingSummaryManager.from_settings(settings)
     base_model = ChatOpenAI(
         model=settings.openai_model,
         api_key=settings.openai_api_key,
@@ -192,16 +198,29 @@ def compile_agent_graph(
         preview_chars=int(getattr(settings, "tool_result_preview_chars", 1000)),
     ) if tools else None
 
+    def active_messages(state: AgentState) -> list[Any]:
+        return rolling_summary.active_messages(state)
+
+    def reactive_retry(state: AgentState, build_context: Any, call: Any):
+        return reactive_compact_retry(
+            state=state, manager=rolling_summary, summary_model=base_model,
+            build_context=build_context, call=call,
+        )
+
     def prepare_request_node(state: AgentState) -> dict[str, Any]:
+        compact_update = rolling_summary.proactive_compact(
+            state, base_model,
+            projected_tokens=context_builder.counter.text(system_prompt),
+        )
         goal = _latest_user_question(list(state["messages"]))
         if state.get("status") == "blocked_missing_state":
             if _is_cancellation(goal):
-                return {
+                return {**compact_update,
                     "route_action": "cancel",
                     "status": "failed",
                     "failure_reason": "用户已取消补充信息",
                 }
-            return {
+            return {**compact_update,
                 "route_action": "clarify",
                 "clarified_state": {
                     **state.get("clarified_state", {}),
@@ -220,7 +239,7 @@ def compile_agent_graph(
                 current_step_id = str(state["current_step_id"])
                 if current_step_id not in approved:
                     approved.append(current_step_id)
-                return {
+                return {**compact_update,
                     "route_action": "resume",
                     "execution_mode": "planned",
                     "route_reason": "恢复等待用户确认的计划",
@@ -239,7 +258,7 @@ def compile_agent_graph(
                     "failure_reason": None,
                 }
             if _is_cancellation(goal):
-                return {
+                return {**compact_update,
                     "route_action": "cancel",
                     "execution_mode": "planned",
                     "route_reason": "用户取消了等待确认的计划",
@@ -249,27 +268,32 @@ def compile_agent_graph(
                     "status": "failed",
                     "failure_reason": "用户已取消执行",
                 }
-        return {"route_action": "route"}
+        return {**compact_update, "route_action": "route"}
 
     def prepare_request_route(state: AgentState) -> str:
         return state.get("route_action", "route")
 
     def router_node(state: AgentState) -> dict[str, Any]:
         messages = list(state["messages"])
-        context = context_builder.router(
-            system_prompt=ROUTER_SYSTEM_PROMPT,
-            current_request=_latest_user_question(messages), history=messages,
-            tool_names=", ".join(sorted(available_tool_names)) or "无",
-        )
-        decision = decide_route(
-            base_model,
-            _latest_user_question(messages),
-            tools,
-            requested_mode=state.get("requested_mode", "auto"),
-            conversation_context=_planning_context(messages),
-            model_messages=context.messages,
+        def build(current: AgentState):
+            return context_builder.router(
+                system_prompt=ROUTER_SYSTEM_PROMPT,
+                current_request=_latest_user_question(messages),
+                history=active_messages(current),
+                tool_names=", ".join(sorted(available_tool_names)) or "无",
+                conversation_summary=current.get("conversation_summary"),
+            )
+        decision, context, compact_update = reactive_retry(
+            state, build,
+            lambda built: decide_route(
+                base_model, _latest_user_question(messages), tools,
+                requested_mode=state.get("requested_mode", "auto"),
+                conversation_context=_planning_context(active_messages(state)),
+                model_messages=built.messages,
+            ),
         )
         update: dict[str, Any] = {
+            **compact_update,
             "execution_mode": decision.mode,
             "route_reason": decision.reason,
             "route_confidence": decision.confidence,
@@ -324,18 +348,22 @@ def compile_agent_graph(
             f"- {getattr(tool, 'name', tool.__class__.__name__)}: {str(getattr(tool, 'description', ''))[:300]}"
             for tool in tools
         ) or "当前没有可用工具。"
-        context = context_builder.planner(
-            system_prompt=PLANNER_SYSTEM_PROMPT,
-            current_request=goal, history=list(state["messages"]), tool_catalog=catalog,
-        )
-        plan, attempts = create_plan(
-            base_model,
-            goal,
-            tools,
-            conversation_context=_planning_context(list(state["messages"])),
-            model_messages=context.messages,
+        def build(current: AgentState):
+            return context_builder.planner(
+                system_prompt=PLANNER_SYSTEM_PROMPT, current_request=goal,
+                history=active_messages(current), tool_catalog=catalog,
+                conversation_summary=current.get("conversation_summary"),
+            )
+        (plan, attempts), context, compact_update = reactive_retry(
+            state, build,
+            lambda built: create_plan(
+                base_model, goal, tools,
+                conversation_context=_planning_context(active_messages(state)),
+                model_messages=built.messages,
+            ),
         )
         update = {
+            **compact_update,
             "plan": plan.model_dump(),
             "current_step_id": None,
             "approved_step_ids": [],
@@ -375,13 +403,18 @@ def compile_agent_graph(
         combined_prompt = "\n\n---\n\n".join(
             part for part in (system_prompt, direct_prompt) if part
         )
-        context = context_builder.executor(
-            scene="direct_executor", system_prompt=combined_prompt,
-            current_request=_latest_user_question(msgs),
-            critical_state="Direct 模式；只读工具可直接调用，副作用操作不得绕过权限边界。",
-            messages=msgs,
+        def build(current: AgentState):
+            return context_builder.executor(
+                scene="direct_executor", system_prompt=combined_prompt,
+                current_request=_latest_user_question(msgs),
+                critical_state="Direct 模式；只读工具可直接调用，副作用操作不得绕过权限边界。",
+                messages=active_messages(current),
+                conversation_summary=current.get("conversation_summary"),
+            )
+        response, context, compact_update = reactive_retry(
+            state, build, lambda built: executor_model.invoke(built.messages)
         )
-        update: dict[str, Any] = {"messages": [executor_model.invoke(context.messages)]}
+        update: dict[str, Any] = {**compact_update, "messages": [response]}
         append_trace_event(state, update, "context_events", context.audit)
         return update
 
@@ -551,13 +584,22 @@ def compile_agent_graph(
             f"{json.dumps({'action': state.get('permission_action'), 'approved_permission_keys': state.get('approved_permission_keys', []), 'pending_permission': state.get('pending_permission')}, ensure_ascii=False)}"
         )
         step_start = int(state.get("step_message_start", len(msgs)))
-        evidence = list(msgs[step_start:])
-        context = context_builder.executor(
-            scene="planned_executor", system_prompt=combined_prompt,
-            current_request=_latest_user_question(msgs), critical_state=critical_state,
-            messages=msgs, dependency_evidence=evidence,
+        def build(current: AgentState):
+            current_until = int(current.get("summarized_until", 0))
+            active_evidence = [
+                message for index, message in enumerate(msgs[step_start:], start=step_start)
+                if index >= current_until
+            ]
+            return context_builder.executor(
+                scene="planned_executor", system_prompt=combined_prompt,
+                current_request=_latest_user_question(msgs), critical_state=critical_state,
+                messages=active_messages(current), dependency_evidence=active_evidence,
+                conversation_summary=current.get("conversation_summary"),
+            )
+        response, context, compact_update = reactive_retry(
+            state, build, lambda built: executor_model.invoke(built.messages)
         )
-        update: dict[str, Any] = {"messages": [executor_model.invoke(context.messages)]}
+        update: dict[str, Any] = {**compact_update, "messages": [response]}
         append_trace_event(state, update, "context_events", context.audit)
         return update
 
@@ -836,18 +878,21 @@ def compile_agent_graph(
             f"- {getattr(tool, 'name', tool.__class__.__name__)}: {str(getattr(tool, 'description', ''))[:300]}"
             for tool in tools
         ) or "当前没有可用工具。"
-        replan_context = context_builder.planner(
-            system_prompt=PLANNER_SYSTEM_PROMPT, current_request=old_plan.goal,
-            history=list(state["messages"]), tool_catalog=catalog, feedback=context,
-        )
-        plan, attempts = create_plan(
-            base_model,
-            old_plan.goal,
-            tools,
-            conversation_context=context,
-            model_messages=replan_context.messages,
+        def build(current: AgentState):
+            return context_builder.planner(
+                system_prompt=PLANNER_SYSTEM_PROMPT, current_request=old_plan.goal,
+                history=active_messages(current), tool_catalog=catalog, feedback=context,
+                conversation_summary=current.get("conversation_summary"),
+            )
+        (plan, attempts), replan_context, compact_update = reactive_retry(
+            state, build,
+            lambda built: create_plan(
+                base_model, old_plan.goal, tools, conversation_context=context,
+                model_messages=built.messages,
+            ),
         )
         update = {
+            **compact_update,
             "plan": plan.model_dump(),
             "current_step_id": None,
             "step_results": [],
@@ -912,15 +957,44 @@ def compile_agent_graph(
             message for message in messages[latest_user_index + 1:]
             if isinstance(message, ToolMessage)
         ]
-        memory = [message for message in messages if isinstance(message, SystemMessage) and "长期记忆" in _message_text(message)]
         draft = next((_message_text(message) for message in reversed(messages) if isinstance(message, AIMessage) and not _tool_calls(message)), "")
-        context = context_builder.answer_composer(
-            system_prompt=_system_prompt_for_style(choose_answer_style(messages)),
-            current_request=current_request, execution_summary=_execution_summary(state),
-            evidence=evidence, draft=draft, memory=memory,
-        )
-        response = await acompose_final_answer(base_model, messages, model_messages=context.messages)
-        update: dict[str, Any] = {"messages": [response]}
+        def build(current: AgentState):
+            active = active_messages(current)
+            memory = [message for message in active if isinstance(message, SystemMessage) and "长期记忆" in _message_text(message)]
+            return context_builder.answer_composer(
+                system_prompt=_system_prompt_for_style(choose_answer_style(messages)),
+                current_request=current_request, execution_summary=_execution_summary(current),
+                evidence=evidence, draft=draft, memory=memory,
+                conversation_summary=current.get("conversation_summary"),
+            )
+        context = build(state)
+        compact_update: dict[str, Any] = {}
+        if context.audit["total_tokens"] >= int(rolling_summary.max_input_tokens * 0.9):
+            compact_update = rolling_summary.compact(state, base_model, mode="proactive")
+            if compact_update.get("conversation_summary"):
+                context = build({**state, **compact_update})
+        try:
+            response = await acompose_final_answer(
+                base_model, messages, model_messages=context.messages,
+                propagate_context_errors=True,
+            )
+        except Exception as exc:
+            if not is_context_length_error(exc):
+                raise
+            working_state = {**state, **compact_update}
+            reactive_update = rolling_summary.compact(
+                working_state, base_model, mode="reactive"
+            )
+            if not reactive_update.get("conversation_summary"):
+                raise
+            compact_update = {**compact_update, **reactive_update}
+            shadow = {**working_state, **reactive_update}
+            context = build(shadow)
+            response = await acompose_final_answer(
+                base_model, messages, model_messages=context.messages,
+                propagate_context_errors=True,
+            )
+        update: dict[str, Any] = {**compact_update, "messages": [response]}
         append_trace_event(state, update, "context_events", context.audit)
         return update
 
@@ -930,19 +1004,21 @@ def compile_agent_graph(
     def reviewer_node(state: AgentState) -> dict[str, Any]:
         messages = list(state["messages"])
         answer = _message_text(messages[-1]) if messages else ""
-        review_context = context_builder.reviewer(
-            system_prompt=REVIEWER_SYSTEM_PROMPT,
-            current_request=_latest_user_question(messages), answer=answer,
-            execution_summary=_execution_summary(state),
-        )
-        decision = review_answer(
-            base_model,
-            _latest_user_question(messages),
-            answer,
-            _execution_summary(state),
-            model_messages=review_context.messages,
+        def build(current: AgentState):
+            return context_builder.reviewer(
+                system_prompt=REVIEWER_SYSTEM_PROMPT,
+                current_request=_latest_user_question(messages), answer=answer,
+                execution_summary=_execution_summary(current),
+            )
+        decision, review_context, compact_update = reactive_retry(
+            state, build,
+            lambda built: review_answer(
+                base_model, _latest_user_question(messages), answer,
+                _execution_summary(state), model_messages=built.messages,
+            ),
         )
         update = {
+            **compact_update,
             "review_action": decision.action,
             "review_feedback": decision.feedback or decision.reason,
             "review_attempts": state.get("review_attempts", 0) + 1,

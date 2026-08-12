@@ -155,6 +155,9 @@ def test_execution_trace_summary_uses_unified_event_buckets():
         "error_events": [{"source": "tool", "error_type": "timeout"}],
         "context_events": [{"scene": "router", "trimmed": [{"category": "summary"}]}],
         "tool_result_records": [{"result_id": "raw-1", "tool_args": {"api_key": "secret"}}],
+        "compact_events": [{"mode": "proactive", "status": "success"}],
+        "summary_version": 1,
+        "summarized_until": 5,
     }
     summary = build_request_summary(state)
     trace = execution_trace_from_state({**state, "request_summary": summary})
@@ -170,4 +173,7 @@ def test_execution_trace_summary_uses_unified_event_buckets():
     assert trace["context_events"][0]["scene"] == "router"
     assert trace["tool_result_records"][0]["result_id"] == "raw-1"
     assert trace["tool_result_records"][0]["tool_args"]["api_key"] == "[REDACTED]"
+    assert summary["rolling_compacts"] == 1
+    assert summary["rolling_summary_calls"] == 1
+    assert trace["rolling_summary"]["summary_version"] == 1
     assert summary["final_status"] == "degraded"

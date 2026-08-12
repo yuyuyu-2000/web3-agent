@@ -159,24 +159,54 @@ class ContextBuilder:
         }
         return ContextBuildResult(scene=scene, messages=output, audit=audit)
 
-    def router(self, *, system_prompt: str, current_request: str, history: Sequence[Any], tool_names: str) -> ContextBuildResult:
+    @staticmethod
+    def summary_part(conversation_summary: dict[str, Any] | None) -> ContextPart:
+        text = (
+            "当前线程较早历史的 task-aware rolling summary：\n"
+            + json.dumps(conversation_summary, ensure_ascii=False, default=str)
+            if conversation_summary else ""
+        )
+        return _text_part("summary", SystemMessage, text, 8)
+
+    @staticmethod
+    def summary_constraints_part(conversation_summary: dict[str, Any] | None) -> ContextPart:
+        if not conversation_summary:
+            return ContextPart("summary_constraints", [], 5, True)
+        keys = (
+            "current_goal", "confirmed_user_constraints", "important_entities",
+            "important_numbers", "unresolved_errors", "permissions_approvals",
+            "clarified_state", "open_questions",
+        )
+        critical = {key: conversation_summary.get(key) for key in keys}
+        return _text_part(
+            "summary_constraints", SystemMessage,
+            "线程摘要中的关键目标、约束与未决状态：\n"
+            + json.dumps(critical, ensure_ascii=False, default=str),
+            5, True,
+        )
+
+    def router(self, *, system_prompt: str, current_request: str, history: Sequence[Any], tool_names: str, conversation_summary: dict[str, Any] | None = None) -> ContextBuildResult:
         recent = _recent_non_tool(history, exclude_latest=True, limit=8)
         return self.build("router", [
             _text_part("system", SystemMessage, system_prompt, 1, True),
+            self.summary_constraints_part(conversation_summary),
+            self.summary_part(conversation_summary),
             ContextPart("recent_history", recent, 7, newest_first=True),
             _text_part("current_request", HumanMessage, f"用户当前请求：\n{current_request}\n\n可用工具名称：{tool_names}", 2, True),
         ])
 
-    def planner(self, *, system_prompt: str, current_request: str, history: Sequence[Any], tool_catalog: str, feedback: str = "") -> ContextBuildResult:
+    def planner(self, *, system_prompt: str, current_request: str, history: Sequence[Any], tool_catalog: str, feedback: str = "", conversation_summary: dict[str, Any] | None = None) -> ContextBuildResult:
         recent = _recent_non_tool(history, exclude_latest=True, limit=8)
         request = f"用户当前目标：\n{current_request}\n\n可用工具：\n{tool_catalog}{feedback}"
         return self.build("planner", [
             _text_part("system", SystemMessage, system_prompt, 1, True),
+            self.summary_constraints_part(conversation_summary),
+            self.summary_part(conversation_summary),
             ContextPart("recent_history", recent, 7, newest_first=True),
             _text_part("current_request", HumanMessage, request, 2, True),
         ])
 
-    def executor(self, *, scene: Literal["direct_executor", "planned_executor"], system_prompt: str, current_request: str, critical_state: str, messages: Sequence[Any], dependency_evidence: Sequence[BaseMessage] = ()) -> ContextBuildResult:
+    def executor(self, *, scene: Literal["direct_executor", "planned_executor"], system_prompt: str, current_request: str, critical_state: str, messages: Sequence[Any], dependency_evidence: Sequence[BaseMessage] = (), conversation_summary: dict[str, Any] | None = None) -> ContextBuildResult:
         memory, history = _split_memory_and_history(messages)
         evidence_ids = {id(message) for message in dependency_evidence}
         history = [message for message in history if id(message) not in evidence_ids]
@@ -195,13 +225,15 @@ class ContextBuilder:
         return self.build(scene, [
             _text_part("system", SystemMessage, system_prompt, 1, True),
             ContextPart("memory", memory, 6),
+            self.summary_constraints_part(conversation_summary),
+            self.summary_part(conversation_summary),
             ContextPart("recent_history", recent, 7, newest_first=True),
             _text_part("current_request", HumanMessage, current_request, 2, True),
             _text_part("critical_state", SystemMessage, critical_state, 3, True),
             ContextPart("dependency_evidence", list(dependency_evidence), 4, True),
         ])
 
-    def answer_composer(self, *, system_prompt: str, current_request: str, execution_summary: str, evidence: Sequence[BaseMessage], draft: str, memory: Sequence[BaseMessage] = ()) -> ContextBuildResult:
+    def answer_composer(self, *, system_prompt: str, current_request: str, execution_summary: str, evidence: Sequence[BaseMessage], draft: str, memory: Sequence[BaseMessage] = (), conversation_summary: dict[str, Any] | None = None) -> ContextBuildResult:
         evidence_messages = [
             HumanMessage(content=f"工具证据 {getattr(message, 'name', 'unknown_tool')}：\n{_content_text(tool_message_for_context(message, compact_old=True).content)}")
             for message in evidence
@@ -209,6 +241,8 @@ class ContextBuilder:
         return self.build("answer_composer", [
             _text_part("system", SystemMessage, system_prompt, 1, True),
             ContextPart("memory", list(memory), 6),
+            self.summary_constraints_part(conversation_summary),
+            self.summary_part(conversation_summary),
             _text_part("current_request", HumanMessage, current_request, 2, True),
             _text_part("critical_state", SystemMessage, execution_summary, 3, True),
             ContextPart("evidence", evidence_messages, 4, True),

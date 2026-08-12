@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from chaincloud_agent_service.agent.planning.models import Plan, PlanStep
 from chaincloud_agent_service.agent.planning.validator import validate_plan
+from chaincloud_agent_service.agent.rolling_summary import is_context_length_error
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
@@ -103,6 +104,8 @@ def create_plan(
             plan = _parse_plan(_message_text(response))
             return validate_plan(plan, tool_names), attempt
         except Exception as exc:
+            if is_context_length_error(exc):
+                raise
             feedback = f"\n\n上一次输出无效：{exc}。请修正后只输出合法 JSON。"
 
     fallback = Plan(
