@@ -14,7 +14,10 @@ import LoginPage from "./LoginPage";
 import type {
   AuthTokenResponse,
   ChatMessage,
+  ChatStreamEvent,
   ClarificationRequest,
+  ExecutionProgressEvent,
+  ExecutionTrace,
   MemoryRecord,
   PermissionRequest,
   ToolInfo,
@@ -121,7 +124,12 @@ function stripReasoningBlocks(content: string): string {
     .trim();
 }
 
-function buildAssistantMessages(replyText: string, trace: ChatMessage["trace"]): ChatMessage[] {
+function buildAssistantMessages(
+  replyText: string,
+  trace: ChatMessage["trace"],
+  progress?: ExecutionProgressEvent[],
+  executionTrace?: ExecutionTrace
+): ChatMessage[] {
   const assistantMessages: ChatMessage[] = [];
   const cleanedReply = stripReasoningBlocks(replyText);
   let textOnly = cleanedReply;
@@ -148,7 +156,9 @@ function buildAssistantMessages(replyText: string, trace: ChatMessage["trace"]):
       id: newId("assistant-text"),
       role: "assistant",
       content: textOnly,
-      trace
+      trace,
+      progress,
+      executionTrace
     });
   }
 
@@ -157,7 +167,9 @@ function buildAssistantMessages(replyText: string, trace: ChatMessage["trace"]):
       id: newId(`assistant-img-${idx}`),
       role: "assistant",
       content: `[IMAGE]${url}`,
-      trace: !textOnly && idx === 0 ? trace : undefined
+      trace: !textOnly && idx === 0 ? trace : undefined,
+      progress: !textOnly && idx === 0 ? progress : undefined,
+      executionTrace: !textOnly && idx === 0 ? executionTrace : undefined
     });
   });
 
@@ -166,7 +178,9 @@ function buildAssistantMessages(replyText: string, trace: ChatMessage["trace"]):
       id: newId(`assistant-chart-${idx}`),
       role: "assistant",
       content: `[CHART]${url}`,
-      trace: !textOnly && imageUrls.length === 0 && idx === 0 ? trace : undefined
+      trace: !textOnly && imageUrls.length === 0 && idx === 0 ? trace : undefined,
+      progress: !textOnly && imageUrls.length === 0 && idx === 0 ? progress : undefined,
+      executionTrace: !textOnly && imageUrls.length === 0 && idx === 0 ? executionTrace : undefined
     });
   });
 
@@ -175,11 +189,93 @@ function buildAssistantMessages(replyText: string, trace: ChatMessage["trace"]):
       id: newId("assistant"),
       role: "assistant",
       content: cleanedReply || replyText,
-      trace
+      trace,
+      progress,
+      executionTrace
     });
   }
 
   return assistantMessages;
+}
+
+const OBSERVABILITY_EVENT_TYPES = new Set([
+  "route_selected", "plan_created", "plan_updated", "step_started",
+  "permission_checked", "step_evaluated", "step_completed", "review_decided",
+  "answer_reviewed", "tool_retry", "tool_recovered", "node_completed",
+  "execution_completed"
+]);
+
+function isObservabilityEvent(event: ChatStreamEvent): event is ExecutionProgressEvent {
+  return OBSERVABILITY_EVENT_TYPES.has(event.type);
+}
+
+const NODE_LABELS: Record<string, string> = {
+  router: "路由选择", direct_agent: "直接执行", planner: "生成计划",
+  select_step: "选择步骤", permission_gate: "权限检查", executor: "执行任务",
+  tools: "调用工具", evaluator: "结果评估", replan: "更新计划",
+  compose_answer: "组织回答", reviewer: "审核回答"
+};
+
+function progressLabel(event: ExecutionProgressEvent): string {
+  switch (event.type) {
+    case "route_selected": return `选择执行模式：${event.mode || "unknown"}`;
+    case "plan_created": return "执行计划已生成";
+    case "plan_updated": return "执行计划已更新";
+    case "step_started": return `开始步骤 ${event.step_id || ""}`.trim();
+    case "step_evaluated": return `评估步骤：${event.action || "完成"}`;
+    case "step_completed": return `步骤完成：${event.status || "success"}`;
+    case "permission_checked": return `权限检查：${event.action || "完成"}`;
+    case "review_decided": return event.required ? "回答需要审核" : "无需额外审核";
+    case "answer_reviewed": return `回答审核：${event.action || "完成"}`;
+    case "tool_retry": return `重试工具 ${event.tool_name || ""}`.trim();
+    case "tool_recovered": return `工具恢复 ${event.tool_name || ""}`.trim();
+    case "execution_completed": return "执行完成";
+    case "node_completed": return NODE_LABELS[event.node_name || ""] || event.node_name || "节点完成";
+    default: return event.type;
+  }
+}
+
+function ExecutionTimeline({ message, devMode }: { message: ChatMessage; devMode: boolean }) {
+  const progress = message.progress || [];
+  if (!progress.length) return null;
+  const isRunning = progress[progress.length - 1]?.type !== "execution_completed";
+
+  return (
+    <section className="execution-timeline" aria-label="Agent 执行过程">
+      <div className="execution-title">
+        <strong>执行过程</strong>
+        <span className={isRunning ? "execution-running" : "execution-finished"}>
+          {isRunning ? "进行中" : "已完成"}
+        </span>
+      </div>
+      <ol>
+        {progress.map((item, index) => (
+          <li key={`${item.type}-${item.timestamp}-${index}`}>
+            <span className="execution-dot" />
+            <div className="execution-event">
+              <div>
+                <span>{progressLabel(item)}</span>
+                {typeof item.duration_ms === "number" ? <time>{item.duration_ms.toFixed(0)} ms</time> : null}
+              </div>
+              {devMode && item.reason ? <small>{item.reason}</small> : null}
+              {devMode ? (
+                <details>
+                  <summary>详情</summary>
+                  <pre>{JSON.stringify(item, null, 2)}</pre>
+                </details>
+              ) : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+      {devMode && message.executionTrace ? (
+        <details className="execution-raw">
+          <summary>完整 execution trace</summary>
+          <pre>{JSON.stringify(message.executionTrace, null, 2)}</pre>
+        </details>
+      ) : null}
+    </section>
+  );
 }
 
 function CopyableToken({ value, isAbbreviated = false }: { value: string; isAbbreviated?: boolean }) {
@@ -624,9 +720,10 @@ export default function App() {
     setLoading(true);
 
     const assistantId = newId("assistant-stream");
+    let progressEvents: ExecutionProgressEvent[] = [];
     setMessages((prev) => [
       ...prev,
-      { id: assistantId, role: "assistant", content: "正在思考..." }
+      { id: assistantId, role: "assistant", content: "正在思考...", progress: [] }
     ]);
 
     try {
@@ -640,6 +737,18 @@ export default function App() {
         },
         async (event) => {
           if (event.type === "error") throw new Error(event.message);
+          if (isObservabilityEvent(event)) {
+            const progressEvent: ExecutionProgressEvent = {
+              ...event,
+              timestamp: typeof event.timestamp === "string"
+                ? event.timestamp
+                : new Date().toISOString()
+            };
+            progressEvents = [...progressEvents, progressEvent];
+            setMessages((prev) => prev.map((message) =>
+              message.id === assistantId ? { ...message, progress: progressEvents } : message
+            ));
+          }
           if (event.type === "permission_required") {
             setPendingPermission(event);
             setMessages((prev) => prev.filter((item) => item.id !== assistantId));
@@ -666,7 +775,9 @@ export default function App() {
             ));
             await nextPaint();
           } else if (event.type === "done") {
-            const finalMessages = buildAssistantMessages(event.reply, event.trace);
+            const finalMessages = buildAssistantMessages(
+              event.reply, event.trace, progressEvents, event.execution_trace
+            );
             setMessages((prev) => {
               const index = prev.findIndex((message) => message.id === assistantId);
               if (index < 0) return [...prev, ...finalMessages];
@@ -979,6 +1090,7 @@ export default function App() {
                 ) : (
                   renderMarkdownContent(message.content)
                 )}
+                <ExecutionTimeline message={message} devMode={devMode} />
                 {message.trace?.length ? (
                   <details className="trace">
                     <summary>查看 trace</summary>

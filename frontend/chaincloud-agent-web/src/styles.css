@@ -486,6 +486,115 @@ button:disabled {
   color: #64748b;
 }
 
+.execution-timeline {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #f8fbff;
+  color: #334155;
+}
+
+.execution-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 9px;
+  font-size: 13px;
+}
+
+.execution-title span {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.execution-running {
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+
+.execution-finished {
+  color: #047857;
+  background: #d1fae5;
+}
+
+.execution-timeline ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.execution-timeline li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 8px;
+  padding: 3px 0 8px;
+  font-size: 13px;
+}
+
+.execution-timeline li:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: -2px;
+  left: 5px;
+  width: 2px;
+  background: #bfdbfe;
+}
+
+.execution-dot {
+  z-index: 1;
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border: 2px solid #eff6ff;
+  border-radius: 50%;
+  background: #3b82f6;
+}
+
+.execution-event > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.execution-event time,
+.execution-event small {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.execution-event small {
+  display: block;
+  margin-top: 2px;
+}
+
+.execution-event details,
+.execution-raw {
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.execution-event summary,
+.execution-raw summary {
+  cursor: pointer;
+  color: #2563eb;
+}
+
+.execution-event pre,
+.execution-raw pre {
+  max-height: 260px;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #dbeafe;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
 .trace {
   margin-top: 12px;
   border-top: 1px solid #e2e8f0;

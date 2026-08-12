@@ -542,6 +542,14 @@ async def chat_stream(
                         if not isinstance(node_messages, list):
                             node_messages = [node_messages]
                         messages.extend(message for message in node_messages if message is not None)
+                        node_events = update.get("node_events", [])
+                        if isinstance(node_events, list):
+                            matching_events = [
+                                event for event in node_events
+                                if isinstance(event, dict) and event.get("node_name") == node_name
+                            ]
+                            if matching_events:
+                                yield _ndjson_event("node_completed", **matching_events[-1])
                     if node_name == "router" and isinstance(update, dict):
                         yield _ndjson_event(
                             "route_selected",

@@ -5,6 +5,59 @@ export interface ChatMessage {
   role: Role;
   content: string;
   trace?: ChatTraceEvent[];
+  progress?: ExecutionProgressEvent[];
+  executionTrace?: ExecutionTrace;
+}
+
+export type ObservabilityEventType =
+  | "route_selected"
+  | "plan_created"
+  | "plan_updated"
+  | "step_started"
+  | "permission_checked"
+  | "step_evaluated"
+  | "step_completed"
+  | "review_decided"
+  | "answer_reviewed"
+  | "tool_retry"
+  | "tool_recovered"
+  | "node_completed"
+  | "execution_completed";
+
+export interface ExecutionProgressEvent {
+  type: ObservabilityEventType;
+  timestamp: string;
+  node_name?: string;
+  duration_ms?: number;
+  status?: string;
+  mode?: string;
+  source?: string;
+  reason?: string;
+  goal?: string;
+  steps?: unknown[];
+  step_id?: string;
+  action?: string;
+  required?: boolean;
+  risk_level?: string;
+  tool_name?: string;
+  attempt?: number;
+  final_status?: string;
+  total_duration_ms?: number;
+  llm_calls?: number;
+  tool_calls?: number;
+  tool_retries?: number;
+  errors?: number;
+  [key: string]: unknown;
+}
+
+export interface ExecutionTrace {
+  trace_id?: string;
+  thread_id?: string;
+  node_events?: Record<string, unknown>[];
+  tool_events?: Record<string, unknown>[];
+  decision_events?: Record<string, unknown>[];
+  error_events?: Record<string, unknown>[];
+  request_summary?: Record<string, unknown>;
 }
 
 export interface ChatTraceEvent {
@@ -33,10 +86,11 @@ export interface ChatResponse {
 export type ChatStreamEvent =
   | { type: "status"; content: string }
   | { type: "delta"; content: string }
-  | { type: "done"; reply: string; trace?: ChatTraceEvent[] }
+  | { type: "done"; reply: string; trace?: ChatTraceEvent[]; execution_trace?: ExecutionTrace }
   | ({ type: "permission_required" } & PermissionRequest)
   | ({ type: "clarification_required" } & ClarificationRequest)
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | ExecutionProgressEvent;
 
 export interface PermissionRequest {
   step_id: string;
