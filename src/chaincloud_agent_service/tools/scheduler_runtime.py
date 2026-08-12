@@ -148,6 +148,20 @@ def start_scheduler(executor: TaskExecutor) -> None:
     _scheduler.start()
 
 
+def add_monitor_scan_job(scan: Callable[[], Any], interval_sec: int) -> None:
+    """Register exactly one coalesced monitor job for all users and rules."""
+    _scheduler.add_job(
+        scan,
+        trigger="interval",
+        seconds=max(5, interval_sec),
+        id="chaincloud-monitor-scan",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=max(10, interval_sec),
+    )
+
+
 def add_scheduled_task(
     prompt: str,
     trigger_type: str,

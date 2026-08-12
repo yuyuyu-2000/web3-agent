@@ -19,6 +19,7 @@ _READ_ONLY_TOOLS = {
     "search_knowledge", "web_search", "clickhouse_list_datasources",
     "clickhouse_select", "tron_node_request", "ethereum_jsonrpc",
     "contract_decode_tx_input",
+    "list_monitor_rules",
 }
 _SIDE_EFFECT_TOOLS: dict[str, tuple[str, str]] = {
     "add_scheduled_task": ("high", "将创建并持久化一个定时任务，之后会自动执行"),
@@ -30,6 +31,9 @@ _SIDE_EFFECT_TOOLS: dict[str, tuple[str, str]] = {
     "generate_dual_axis_chart": ("low", "将在服务端生成并保存图表文件"),
     "generate_price_distribution_chart": ("low", "将在服务端生成并保存图表文件"),
     "generate_liquidation_simulation_chart": ("low", "将在服务端生成并保存图表文件"),
+    "create_monitor_rule": ("medium", "将创建并持久化后台监控规则，并可能主动发送通知"),
+    "delete_monitor_rule": ("medium", "将删除已有后台监控规则"),
+    "set_monitor_rule_enabled": ("medium", "将修改后台监控规则启用状态"),
 }
 _DENY_HINTS = (
     "绕过权限", "越权", "窃取", "泄露密钥", "导出私钥", "删除所有",

@@ -28,6 +28,7 @@ from chaincloud_agent_service.observability.trace import (
     traced_node,
 )
 from chaincloud_agent_service.tools.registry import get_tools
+from chaincloud_agent_service.monitoring.runtime import bind_monitor_user, reset_monitor_user
 
 
 MAX_STEP_TOOL_CALLS = 4
@@ -540,10 +541,14 @@ def compile_agent_graph(
             plan = _plan_from_state(state)
             step = next(item for item in plan.steps if item.id == state.get("current_step_id"))
             fallback_tools = set(step.fallback_tools)
-        result = tool_node.invoke(
-            state, remaining_budget=remaining, step_id=state.get("current_step_id"),
-            fallback_tools=fallback_tools,
-        )
+        user_token = bind_monitor_user(state.get("user_id"))
+        try:
+            result = tool_node.invoke(
+                state, remaining_budget=remaining, step_id=state.get("current_step_id"),
+                fallback_tools=fallback_tools,
+            )
+        finally:
+            reset_monitor_user(user_token)
         attempts = int(result.get("attempts", 0))
         errors = [
             payload for message in result.get("messages", [])

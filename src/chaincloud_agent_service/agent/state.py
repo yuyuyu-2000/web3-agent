@@ -10,6 +10,7 @@ class AgentState(TypedDict):
     """Checkpointed state shared by planning and execution nodes."""
 
     messages: Annotated[list[Any], add_messages]
+    user_id: NotRequired[str | None]
     trace_id: NotRequired[str]
     trace_thread_id: NotRequired[str]
     trace_started_at: NotRequired[str]

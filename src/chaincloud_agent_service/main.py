@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ from chaincloud_agent_service.api.routes import chat as chat_routes
 from chaincloud_agent_service.api.routes import memory as memory_routes
 from chaincloud_agent_service.api.routes import scheduler as scheduler_routes
 from chaincloud_agent_service.api.routes import tools as tools_routes
+from chaincloud_agent_service.api.routes import monitoring as monitoring_routes
 from chaincloud_agent_service.config import load_settings
 from chaincloud_agent_service.memory import MemoryService, create_memory_store
 from chaincloud_agent_service.persistence.checkpoint import (
@@ -24,6 +26,10 @@ from chaincloud_agent_service.persistence.checkpoint import (
     postgres_checkpointer,
 )
 from chaincloud_agent_service.tools.scheduler_runtime import start_scheduler
+from chaincloud_agent_service.tools.scheduler_runtime import add_monitor_scan_job
+from chaincloud_agent_service.monitoring import MonitorStore, MonitorWorker, PostgresTransactionSource
+from chaincloud_agent_service.monitoring.runtime import configure_monitor_store
+from chaincloud_agent_service.notification import FeishuNotifier, NotificationService
 
 
 def _install_app_state(
@@ -40,6 +46,38 @@ def _install_app_state(
     app.state.memory_service = memory_service
     app.state.memory_llm = memory_llm
     app.state.auth_service = auth_service
+
+
+def _configure_monitoring(app: FastAPI, settings) -> None:
+    if not settings.monitor_enabled:
+        configure_monitor_store(None)
+        return
+    if not settings.monitor_database_url or not settings.monitor_transaction_database_url:
+        raise RuntimeError("MONITOR_ENABLED requires monitor and transaction database URLs")
+    store = MonitorStore(settings.monitor_database_url, prefix=settings.monitor_table_prefix)
+    store.ensure_schema()
+    configure_monitor_store(store)
+    default_columns = {
+        "id": "id", "hash": "transaction_hash", "from_address": "from_address",
+        "to_address": "to_address", "amount": "amount", "amount_usd": "amount_usd",
+        "chain": "chain", "token": "token", "occurred_at": "created_at",
+    }
+    if settings.monitor_transaction_columns:
+        default_columns.update(json.loads(settings.monitor_transaction_columns))
+    source = PostgresTransactionSource(
+        settings.monitor_transaction_database_url, table=settings.monitor_transaction_table,
+        columns=default_columns, batch_size=settings.monitor_scan_batch_size,
+        process_existing_on_first_run=settings.monitor_process_existing,
+    )
+    notifications = NotificationService({"feishu": FeishuNotifier()})
+
+    def destination_for_user(user_id: str, channel: str) -> str | None:
+        return store.notification_destination(user_id, channel)
+
+    worker = MonitorWorker(store, source, notifications, destination_for_user)
+    app.state.monitor_store = store
+    app.state.monitor_worker = worker
+    add_monitor_scan_job(worker.run_once, settings.monitor_scan_interval_sec)
 
 
 @asynccontextmanager
@@ -92,6 +130,7 @@ async def lifespan(app: FastAPI):
                 auth_service=auth_service,
             )
             start_scheduler(_scheduled_executor)
+            _configure_monitoring(app, settings)
             yield #配置 DATABASE_URL：会话保存到 PostgreSQL，重启后仍存在，也适合多进程部署。
     else:
         checkpointer = memory_checkpointer()
@@ -105,6 +144,7 @@ async def lifespan(app: FastAPI):
             auth_service=auth_service,
         )
         start_scheduler(_scheduled_executor)
+        _configure_monitoring(app, settings)
         yield  #没有配置：保存到当前进程内存，服务重启后消失。
 
 
@@ -118,6 +158,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_routes.router, tags=["memory"])
     app.include_router(scheduler_routes.router, tags=["scheduler"])
     app.include_router(tools_routes.router, tags=["tools"])
+    app.include_router(monitoring_routes.router, tags=["monitoring"])
     return app
 
 

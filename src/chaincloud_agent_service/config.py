@@ -66,6 +66,15 @@ class Settings:
     max_tool_retries: int = 2
     max_step_retries: int = 2
     max_total_tool_calls: int = 12
+    monitor_enabled: bool = False
+    monitor_database_url: str | None = None
+    monitor_table_prefix: str = "monitor"
+    monitor_scan_interval_sec: int = 30
+    monitor_transaction_database_url: str | None = None
+    monitor_transaction_table: str = "transactions"
+    monitor_transaction_columns: str = ""
+    monitor_scan_batch_size: int = 1000
+    monitor_process_existing: bool = False
 
 
 def load_settings() -> Settings:
@@ -139,6 +148,7 @@ def load_settings() -> Settings:
     max_tool_retries = bounded_int("MAX_TOOL_RETRIES", 2, 0, 10)
     max_step_retries = bounded_int("MAX_STEP_RETRIES", 2, 0, 10)
     max_total_tool_calls = bounded_int("MAX_TOTAL_TOOL_CALLS", 12, 1, 100)
+    monitor_enabled = os.environ.get("MONITOR_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
     token = os.environ.get("CHAT_API_TOKEN", "").strip()
     web_search_enabled = os.environ.get("WEB_SEARCH_ENABLED", "0").strip().lower() in (
         "1",
@@ -219,6 +229,8 @@ def load_settings() -> Settings:
         auth_token_expire_minutes = 5
     if auth_token_expire_minutes > 43200:
         auth_token_expire_minutes = 43200
+    monitor_database_url = os.environ.get("MONITOR_DATABASE_URL", "").strip() or auth_database_url
+    monitor_transaction_database_url = os.environ.get("MONITOR_TRANSACTION_DATABASE_URL", "").strip() or ro or None
     return Settings(
         database_url=database_url,
         readonly_database_url=ro or None,
@@ -261,4 +273,13 @@ def load_settings() -> Settings:
         max_tool_retries=max_tool_retries,
         max_step_retries=max_step_retries,
         max_total_tool_calls=max_total_tool_calls,
+        monitor_enabled=monitor_enabled,
+        monitor_database_url=monitor_database_url,
+        monitor_table_prefix=os.environ.get("MONITOR_TABLE_PREFIX", "monitor").strip() or "monitor",
+        monitor_scan_interval_sec=bounded_int("MONITOR_SCAN_INTERVAL_SEC", 30, 5, 3600),
+        monitor_transaction_database_url=monitor_transaction_database_url,
+        monitor_transaction_table=os.environ.get("MONITOR_TRANSACTION_TABLE", "transactions").strip() or "transactions",
+        monitor_transaction_columns=os.environ.get("MONITOR_TRANSACTION_COLUMNS", "").strip(),
+        monitor_scan_batch_size=bounded_int("MONITOR_SCAN_BATCH_SIZE", 1000, 1, 10000),
+        monitor_process_existing=os.environ.get("MONITOR_PROCESS_EXISTING", "0").strip().lower() in ("1", "true", "yes", "on"),
     )

@@ -304,10 +304,11 @@ async def chat(
     config = {"configurable": {"thread_id": body.thread_id}}
     input_messages = _build_input_messages(request, body, current_user)
     execution_context = new_execution_context(body.thread_id)
+    user_context = {"user_id": current_user.user_id} if current_user else {}
 
     try:
         result = await graph.ainvoke(
-            {"messages": input_messages, "requested_mode": body.planning, **execution_context},
+            {"messages": input_messages, "requested_mode": body.planning, **execution_context, **user_context},
             config=config,
         )
     except APIStatusError as exc:
@@ -489,6 +490,7 @@ async def chat_stream(
     config = {"configurable": {"thread_id": body.thread_id}}
     input_messages = _build_input_messages(request, body, current_user)
     execution_context = new_execution_context(body.thread_id)
+    user_context = {"user_id": current_user.user_id} if current_user else {}
 
     async def events() -> AsyncIterator[bytes]:
         messages: list[Any] = list(input_messages)
@@ -504,7 +506,7 @@ async def chat_stream(
 
         try:
             async for mode, data in graph.astream(
-                {"messages": input_messages, "requested_mode": body.planning, **execution_context},
+                {"messages": input_messages, "requested_mode": body.planning, **execution_context, **user_context},
                 config=config,
                 stream_mode=["messages", "updates"],
             ):
@@ -672,7 +674,14 @@ async def chat_stream(
             if buffer_for_review and reply:
                 streamed_reply = reply
                 yield _ndjson_event("delta", content=reply)
-            payload: dict[str, Any] = {"reply": reply, **_result_metadata(final_metadata)}
+            payload: dict[str, Any] = {
+                "reply": reply,
+                **{
+                    key: value
+                    for key, value in _result_metadata(final_metadata).items()
+                    if value is not None
+                },
+            }
             if body.debug:
                 payload["trace"] = [
                     event.model_dump(exclude_none=True)
