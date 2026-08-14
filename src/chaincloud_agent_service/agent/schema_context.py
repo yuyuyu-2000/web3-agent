@@ -42,7 +42,9 @@ def build_agent_system_prompt(settings: Settings) -> str:
     parts: list[str] = [
         """已知数据源与查询约定：
 - JustLend 协议对应 PostgreSQL 表 public.justlend；处理 JustLend 查询时直接使用该表，不要先调用 postgres_list_tables。
-- public.justlend 的主要金额字段为 amount_usd，业务日期字段为 day，事件时间字段为 occurred；回答中必须说明采用的日期字段和时区口径。
+- public.justlend.day 是上游已计算的美国业务日期（YYYY-MM-DD）。用户询问“某天/当天/某日交易”且未明确指定其他时区时，必须使用 day 过滤；不得从 occurred 自行换算或反推 day。
+- public.justlend.occurred 是同一事件对应的中国时间（UTC+8），默认仅用于展示具体时间和日内排序。只有用户明确要求中国时间/北京时间某日时才可按 occurred 过滤，并须披露口径。
+- 禁止同时查询 day=用户日期 与 occurred LIKE '用户日期%' 后自行选择结果更多的日期口径。
 - 用户未定义“大额”时，默认采用 amount_usd >= 100000 USD；如使用当日金额前 5% 等动态口径，必须明确披露计算方式。
 - 优先用一条聚合 SQL 同时确认日期覆盖、记录数和金额分布，再查询明细；不要为每个统计量单独探查。
 - 数据库查询成功返回空数组时，只要 SQL 条件可追溯，应如实表述为该口径下未发现匹配记录，不得误报为查询未执行。"""
