@@ -86,6 +86,8 @@ class Settings:
     monitor_transaction_columns: str = ""
     monitor_scan_batch_size: int = 1000
     monitor_process_existing: bool = False
+    planned_reviewer_low_model: str | None = None
+    planned_reviewer_high_model: str | None = None
 
 
 def load_settings() -> Settings:
@@ -128,6 +130,16 @@ def load_settings() -> Settings:
     openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     base = os.environ.get("OPENAI_BASE_URL", "").strip()
     model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+    default_low_reviewer_model = (
+        "deepseek-chat" if model.lower() == "deepseek-reasoner" else model
+    )
+    planned_reviewer_low_model = (
+        os.environ.get("PLANNED_REVIEWER_LOW_MODEL", default_low_reviewer_model).strip()
+        or default_low_reviewer_model
+    )
+    planned_reviewer_high_model = (
+        os.environ.get("PLANNED_REVIEWER_HIGH_MODEL", model).strip() or model
+    )
     try:
         openai_timeout_sec = int(
             os.environ.get("OPENAI_TIMEOUT_SEC", "60").strip() or "60"
@@ -340,4 +352,6 @@ def load_settings() -> Settings:
         monitor_transaction_columns=os.environ.get("MONITOR_TRANSACTION_COLUMNS", "").strip(),
         monitor_scan_batch_size=bounded_int("MONITOR_SCAN_BATCH_SIZE", 1000, 1, 10000),
         monitor_process_existing=os.environ.get("MONITOR_PROCESS_EXISTING", "0").strip().lower() in ("1", "true", "yes", "on"),
+        planned_reviewer_low_model=planned_reviewer_low_model,
+        planned_reviewer_high_model=planned_reviewer_high_model,
     )

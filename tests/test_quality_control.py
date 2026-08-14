@@ -4,7 +4,11 @@ from langchain_core.messages import AIMessage
 
 from chaincloud_agent_service.agent.evaluation import evaluate_step
 from chaincloud_agent_service.agent.planning.models import PlanStep, StepResult
-from chaincloud_agent_service.agent.review import direct_requires_review, review_answer
+from chaincloud_agent_service.agent.review import (
+    direct_requires_review,
+    planned_review_effort,
+    review_answer,
+)
 
 
 class _StaticModel:
@@ -101,3 +105,34 @@ def test_reviewer_failure_keeps_composer_answer() -> None:
 
     assert decision.action == "approve"
     assert decision.confidence == 0.0
+
+
+def test_ordinary_planned_review_uses_low_effort() -> None:
+    effort, reason = planned_review_effort(
+        {
+            "route_confidence": 0.95,
+            "plan": {"steps": [{"id": "step_1"}, {"id": "step_2"}]},
+            "step_results": [{"status": "success"}],
+            "status": "completed",
+        },
+        "汇总 SQL 查询结果并解释趋势",
+    )
+
+    assert effort == "low"
+    assert "一致性" in reason
+
+
+def test_risky_or_unstable_planned_review_uses_high_effort() -> None:
+    effort, reason = planned_review_effort(
+        {
+            "route_confidence": 0.7,
+            "replanning_count": 1,
+            "last_tool_errors": [{"message": "two sources conflict"}],
+            "status": "degraded",
+        },
+        "分析异常资金流并判断风险归因",
+    )
+
+    assert effort == "high"
+    assert "风险" in reason
+    assert "置信度" in reason

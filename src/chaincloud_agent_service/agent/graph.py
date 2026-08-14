@@ -18,7 +18,12 @@ from chaincloud_agent_service.agent.evaluation import evaluate_step
 from chaincloud_agent_service.agent.planning import Plan, StepResult, create_plan
 from chaincloud_agent_service.agent.planning.planner import PLANNER_SYSTEM_PROMPT
 from chaincloud_agent_service.agent.permission import evaluate_step_permission
-from chaincloud_agent_service.agent.review import direct_requires_review, review_answer
+from chaincloud_agent_service.agent.review import (
+    LOW_REASONING_REVIEWER_SYSTEM_PROMPT,
+    direct_requires_review,
+    planned_review_effort,
+    review_answer,
+)
 from chaincloud_agent_service.agent.review.reviewer import REVIEWER_SYSTEM_PROMPT
 from chaincloud_agent_service.agent.rolling_summary import (
     RollingSummaryManager,
@@ -184,6 +189,25 @@ def compile_agent_graph(
         max_retries=settings.openai_max_retries,
     )
     executor_model = base_model.bind_tools(tools) if tools else base_model
+    low_reviewer_model_name = str(
+        getattr(settings, "planned_reviewer_low_model", None)
+        or ("deepseek-chat" if settings.openai_model.lower() == "deepseek-reasoner" else settings.openai_model)
+    )
+    high_reviewer_model_name = str(
+        getattr(settings, "planned_reviewer_high_model", None) or settings.openai_model
+    )
+    reviewer_models = {
+        "low": base_model if low_reviewer_model_name == settings.openai_model else ChatOpenAI(
+            model=low_reviewer_model_name, api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url, timeout=settings.openai_timeout_sec,
+            max_retries=settings.openai_max_retries,
+        ),
+        "high": base_model if high_reviewer_model_name == settings.openai_model else ChatOpenAI(
+            model=high_reviewer_model_name, api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url, timeout=settings.openai_timeout_sec,
+            max_retries=settings.openai_max_retries,
+        ),
+    }
     max_tool_retries = int(getattr(settings, "max_tool_retries", 2))
     max_step_retries = int(getattr(settings, "max_step_retries", 2))
     max_total_tool_calls = int(getattr(settings, "max_total_tool_calls", 12))
@@ -1004,16 +1028,26 @@ def compile_agent_graph(
     def reviewer_node(state: AgentState) -> dict[str, Any]:
         messages = list(state["messages"])
         answer = _message_text(messages[-1]) if messages else ""
+        is_planned = state.get("execution_mode") == "planned"
+        effort, effort_reason = (
+            planned_review_effort(state, _latest_user_question(messages))
+            if is_planned else ("high", "Direct Reviewer 保持原有行为")
+        )
+        reviewer_model = reviewer_models[effort] if is_planned else base_model
+        reviewer_prompt = (
+            LOW_REASONING_REVIEWER_SYSTEM_PROMPT
+            if is_planned and effort == "low" else REVIEWER_SYSTEM_PROMPT
+        )
         def build(current: AgentState):
             return context_builder.reviewer(
-                system_prompt=REVIEWER_SYSTEM_PROMPT,
+                system_prompt=reviewer_prompt,
                 current_request=_latest_user_question(messages), answer=answer,
                 execution_summary=_execution_summary(current),
             )
         decision, review_context, compact_update = reactive_retry(
             state, build,
             lambda built: review_answer(
-                base_model, _latest_user_question(messages), answer,
+                reviewer_model, _latest_user_question(messages), answer,
                 _execution_summary(state), model_messages=built.messages,
             ),
         )
@@ -1022,6 +1056,8 @@ def compile_agent_graph(
             "review_action": decision.action,
             "review_feedback": decision.feedback or decision.reason,
             "review_attempts": state.get("review_attempts", 0) + 1,
+            "reviewer_reasoning_effort": effort if is_planned else None,
+            "reviewer_reasoning_reason": effort_reason if is_planned else None,
         }
         append_trace_event(state, update, "context_events", review_context.audit)
         return update

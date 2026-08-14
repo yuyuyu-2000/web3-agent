@@ -68,6 +68,8 @@ class AgentState(TypedDict):
     review_action: NotRequired[Literal["approve", "revise"] | None]
     review_feedback: NotRequired[str | None]
     review_attempts: NotRequired[int]
+    reviewer_reasoning_effort: NotRequired[Literal["low", "high"] | None]
+    reviewer_reasoning_reason: NotRequired[str | None]
     status: NotRequired[
         Literal[
             "planning",

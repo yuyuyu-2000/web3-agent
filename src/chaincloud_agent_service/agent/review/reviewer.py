@@ -42,6 +42,64 @@ REVIEWER_SYSTEM_PROMPT = """你是最终答案 Reviewer。审查草稿是否忠�
 不要亲自重写答案，不要输出思维过程。
 """
 
+LOW_REASONING_REVIEWER_SYSTEM_PROMPT = """你是最终答案 Reviewer。对普通 Planned 任务做快速、严格的事实核对。
+只输出 JSON：
+{"action":"approve或revise","reason":"原因","feedback":"具体修订要求","confidence":0到1}
+
+只检查：
+1. 最终回答是否与 executor/tool 结果一致。
+2. 是否存在明显幻觉。
+3. 是否遗漏用户核心问题。
+4. 是否在证据不足时给出强结论。
+没有实质问题时 approve；有问题时 revise。不要扩展分析，不要亲自重写答案。
+"""
+
+_HIGH_REASONING_HINTS = (
+    "归因", "根因", "冲突", "矛盾", "异常", "风险", "清算", "攻击", "漏洞",
+    "安全", "投资", "财务", "决策", "预测", "推断", "因果", "置信度",
+)
+
+
+def planned_review_effort(state: dict[str, Any], user_message: str) -> tuple[str, str]:
+    """Select reviewer effort without adding another latency-producing model call."""
+    text = " ".join(
+        [
+            user_message,
+            str(state.get("evaluation_feedback") or ""),
+            str(state.get("failure_reason") or ""),
+        ]
+    ).lower()
+    reasons: list[str] = []
+    if any(hint in text for hint in _HIGH_REASONING_HINTS):
+        reasons.append("复杂推理或风险判断")
+    route_confidence = state.get("route_confidence")
+    if route_confidence is not None and float(route_confidence) < 0.75:
+        reasons.append("路由置信度较低")
+    if int(state.get("replanning_count") or 0) > 0:
+        reasons.append("发生重新规划")
+    evaluator_actions = {
+        event.get("action")
+        for event in state.get("decision_events", [])
+        if event.get("decision_type") == "evaluator"
+    }
+    had_tool_error = bool(state.get("last_tool_errors")) or any(
+        event.get("status") == "error" for event in state.get("tool_events", [])
+    )
+    if (
+        int(state.get("step_retry_count") or 0) > 0
+        or evaluator_actions.intersection({"retry", "replan", "partial", "fail"})
+        or had_tool_error
+    ):
+        reasons.append("执行存在重试或工具异常")
+    if state.get("status") in {"partial", "degraded", "failed"}:
+        reasons.append("执行结果不完整")
+    plan = state.get("plan") or {}
+    if len(plan.get("steps", [])) >= 4:
+        reasons.append("计划步骤较多")
+    if reasons:
+        return "high", "；".join(reasons)
+    return "low", "普通 Planned 结果一致性检查"
+
 
 def direct_requires_review(
     user_message: str,
