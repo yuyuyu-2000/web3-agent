@@ -10,7 +10,7 @@ from typing import Any, Literal, Sequence
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from chaincloud_agent_service.agent.context_builder import TokenCounter
+from chaincloud_agent_service.agent.context_builder import TokenCounter, _atomic_message_groups
 
 ROLLING_SUMMARY_SYSTEM_PROMPT = """你是线程上下文压缩器。只根据提供的旧摘要和消息生成 JSON。
 禁止编造，缺失字段使用空值、空数组或空对象。必须保留地址、交易哈希、时间范围、
@@ -157,6 +157,18 @@ class RollingSummaryManager:
         step_start = state.get("step_message_start")
         if isinstance(step_start, int) and state.get("status") == "executing":
             target = min(target, max(start, step_start))
+
+        # Never place summarized_until between an assistant tool request and its
+        # ToolMessages. Move the boundary back to the start of that atomic group.
+        cursor = start
+        safe_target = start
+        for group in _atomic_message_groups(messages[start:]):
+            next_cursor = cursor + len(group)
+            if next_cursor > target:
+                break
+            safe_target = next_cursor
+            cursor = next_cursor
+        target = safe_target
         if target <= start:
             return {"compact_events": [*state.get("compact_events", []), {
                 "type": "rolling_compact", "mode": mode, "status": "skipped",

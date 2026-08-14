@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from chaincloud_agent_service.agent.context_builder import ContextBuilder
 from chaincloud_agent_service.agent.rolling_summary import (
@@ -128,6 +128,28 @@ def test_compaction_keeps_full_checkpoint_messages() -> None:
     assert state["messages"] == original
     assert "messages" not in update
     assert len(update["summarized_message_ids"]) == update["summarized_until"]
+
+
+def test_compaction_boundary_does_not_split_tool_exchange() -> None:
+    rolling = manager()
+    messages = [HumanMessage(content=f"old {index}") for index in range(5)]
+    messages.extend([
+        AIMessage(content="", tool_calls=[{"id": "call-1", "name": "query", "args": {}}]),
+        ToolMessage(content="result", tool_call_id="call-1"),
+        HumanMessage(content="recent one"),
+        HumanMessage(content="recent two"),
+        HumanMessage(content="recent three"),
+    ])
+    state = {"messages": messages}
+
+    update = rolling.compact(state, SummaryModel())
+    active = rolling.active_messages({**state, **update})
+
+    assert update["summarized_until"] == 5
+    assert isinstance(active[0], AIMessage)
+    assert active[0].tool_calls[0]["id"] == "call-1"
+    assert isinstance(active[1], ToolMessage)
+    assert active[1].tool_call_id == "call-1"
 
 
 def test_summary_failure_preserves_old_summary_and_records_failure() -> None:

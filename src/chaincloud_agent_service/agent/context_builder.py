@@ -276,16 +276,28 @@ def _recent_non_tool(messages: Sequence[Any], *, exclude_latest: bool, limit: in
 
 
 def _recent_messages(messages: Sequence[Any], *, current_request: str, limit: int) -> list[BaseMessage]:
-    result: list[BaseMessage] = []
+    source: list[BaseMessage] = []
     skipped_current = False
     for message in reversed(messages):
         if not skipped_current and isinstance(message, HumanMessage) and _content_text(message.content).strip() == current_request.strip():
             skipped_current = True
             continue
-        result.append(message)
+        source.append(message)
+    source.reverse()
+
+    # Select whole assistant-tool exchanges. Slicing individual messages can leave
+    # a ToolMessage without the assistant tool_calls that authorizes it, which the
+    # OpenAI API rejects with HTTP 400.
+    result: list[BaseMessage] = []
+    for group in reversed(_atomic_message_groups(source)):
+        if _is_orphan_tool_group(group):
+            continue
+        if result and len(result) + len(group) > limit:
+            break
+        result[0:0] = group
         if len(result) >= limit:
             break
-    return list(reversed(result))
+    return result
 
 
 def _split_memory_and_history(messages: Sequence[Any]) -> tuple[list[BaseMessage], list[BaseMessage]]:
@@ -328,3 +340,8 @@ def _atomic_message_groups(messages: Sequence[BaseMessage]) -> list[list[BaseMes
         groups.append([message])
         index += 1
     return groups
+
+
+def _is_orphan_tool_group(group: Sequence[BaseMessage]) -> bool:
+    """Return whether a group starts with a tool result lacking its request."""
+    return bool(group) and isinstance(group[0], ToolMessage)

@@ -93,3 +93,36 @@ def test_tool_request_and_result_are_trimmed_atomically() -> None:
     )
     selected_types = [message.type for message in result.messages]
     assert ("ai" in selected_types) == ("tool" in selected_types)
+
+
+def test_recent_window_does_not_orphan_tool_result_at_twelve_message_boundary() -> None:
+    context_builder = ContextBuilder("test", 1000, 800, 100)
+    context_builder.counter = WordCounter()  # type: ignore[assignment]
+    tool_request = AIMessage(
+        content="", tool_calls=[{"id": "call-1", "name": "query", "args": {}}]
+    )
+    tool_result = ToolMessage(content="result", tool_call_id="call-1")
+    history = [tool_request, tool_result]
+    history.extend(HumanMessage(content=f"later {index}") for index in range(11))
+    history.append(HumanMessage(content="current"))
+
+    result = context_builder.executor(
+        scene="direct_executor", system_prompt="rules", current_request="current",
+        critical_state="safe", messages=history,
+    )
+
+    assert tool_request not in result.messages
+    assert tool_result not in result.messages
+    assert not any(isinstance(message, ToolMessage) for message in result.messages)
+
+
+def test_recent_window_drops_preexisting_orphan_tool_message() -> None:
+    context_builder = ContextBuilder("test", 1000, 800, 100)
+    orphan = ToolMessage(content="legacy result", tool_call_id="missing-call")
+
+    result = context_builder.executor(
+        scene="direct_executor", system_prompt="rules", current_request="current",
+        critical_state="safe", messages=[orphan, HumanMessage(content="current")],
+    )
+
+    assert orphan not in result.messages
