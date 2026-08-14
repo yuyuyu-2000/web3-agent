@@ -111,6 +111,28 @@ def test_build_answer_context_labels_tool_evidence() -> None:
     assert "公开资料显示还有更多资金流需要验证。" in context
 
 
+def test_build_answer_context_keeps_safe_sql_args_and_redacts_secrets() -> None:
+    tool_message = ToolMessage(
+        content="[]", name="postgres_select", tool_call_id="call-1",
+        additional_kwargs={
+            "tool_result": {
+                "tool_args": {
+                    "sql": "SELECT * FROM public.justlend WHERE day = '2025-08-06'",
+                    "api_key": "secret-value",
+                }
+            }
+        },
+    )
+
+    context = build_answer_context([HumanMessage(content="查询"), tool_message])
+
+    assert "调用参数" in context
+    assert "public.justlend" in context
+    assert "2025-08-06" in context
+    assert "secret-value" not in context
+    assert "[REDACTED]" in context
+
+
 def test_build_fallback_answer_keeps_original_draft() -> None:
     fallback = build_fallback_answer("这是原始回答。")
 

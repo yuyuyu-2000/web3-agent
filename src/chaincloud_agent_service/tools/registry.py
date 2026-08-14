@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from chaincloud_agent_service.config import Settings
@@ -37,7 +38,8 @@ def get_tools(settings: Settings) -> list[Any]:
         tools.append(make_pg_select_tool(settings.readonly_database_url))
         tools.append(make_pg_list_tables_tool(settings.readonly_database_url))
         tools.append(make_pg_table_schema_tool(settings.readonly_database_url))
-        tools.append(make_kb_search_tool(settings.readonly_database_url))
+        if os.environ.get("KB_ENABLED", "").strip().lower() in {"1", "true", "yes"}:
+            tools.append(make_kb_search_tool(settings.readonly_database_url))
     if settings.web_search_enabled:
         tools.append(
             make_web_search_tool(

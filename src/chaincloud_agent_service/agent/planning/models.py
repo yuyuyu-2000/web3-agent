@@ -14,6 +14,8 @@ class PlanStep(BaseModel):
     requires_confirmation: bool = False
     critical: bool = True
     fallback_tools: list[str] = Field(default_factory=list)
+    estimated_tool_calls: int = Field(default=4, ge=0, le=20)
+    budget_reason: str = ""
 
 
 class Plan(BaseModel):

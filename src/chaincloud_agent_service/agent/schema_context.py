@@ -39,7 +39,14 @@ def load_agent_contract_decode_markdown(settings: Settings) -> str:
 
 def build_agent_system_prompt(settings: Settings) -> str:
     """合并 schema、回答风格、合约解码说明为一条系统提示（中间用分隔线）。"""
-    parts: list[str] = []
+    parts: list[str] = [
+        """已知数据源与查询约定：
+- JustLend 协议对应 PostgreSQL 表 public.justlend；处理 JustLend 查询时直接使用该表，不要先调用 postgres_list_tables。
+- public.justlend 的主要金额字段为 amount_usd，业务日期字段为 day，事件时间字段为 occurred；回答中必须说明采用的日期字段和时区口径。
+- 用户未定义“大额”时，默认采用 amount_usd >= 100000 USD；如使用当日金额前 5% 等动态口径，必须明确披露计算方式。
+- 优先用一条聚合 SQL 同时确认日期覆盖、记录数和金额分布，再查询明细；不要为每个统计量单独探查。
+- 数据库查询成功返回空数组时，只要 SQL 条件可追溯，应如实表述为该口径下未发现匹配记录，不得误报为查询未执行。"""
+    ]
     s = load_agent_schema_markdown(settings)
     if s.strip():
         parts.append(s.strip())
@@ -49,6 +56,4 @@ def build_agent_system_prompt(settings: Settings) -> str:
     c = load_agent_contract_decode_markdown(settings)
     if c.strip():
         parts.append(c.strip())
-    if not parts:
-        return ""
     return "\n\n---\n\n".join(parts)

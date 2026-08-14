@@ -76,7 +76,9 @@ class Settings:
     auth_token_expire_minutes: int
     max_tool_retries: int = 2
     max_step_retries: int = 2
-    max_total_tool_calls: int = 12
+    max_total_tool_calls: int = 16
+    max_step_tool_calls: int = 6
+    max_direct_tool_calls: int = 6
     monitor_enabled: bool = False
     monitor_database_url: str | None = None
     monitor_table_prefix: str = "monitor"
@@ -170,7 +172,9 @@ def load_settings() -> Settings:
 
     max_tool_retries = bounded_int("MAX_TOOL_RETRIES", 2, 0, 10)
     max_step_retries = bounded_int("MAX_STEP_RETRIES", 2, 0, 10)
-    max_total_tool_calls = bounded_int("MAX_TOTAL_TOOL_CALLS", 12, 1, 100)
+    max_total_tool_calls = bounded_int("MAX_TOTAL_TOOL_CALLS", 16, 1, 100)
+    max_step_tool_calls = bounded_int("MAX_STEP_TOOL_CALLS", 6, 1, 50)
+    max_direct_tool_calls = bounded_int("MAX_DIRECT_TOOL_CALLS", 6, 1, 50)
     model_context_window = bounded_int("MODEL_CONTEXT_WINDOW", 128000, 1024, 2000000)
     reserved_output_tokens = bounded_int("RESERVED_OUTPUT_TOKENS", 8000, 128, model_context_window - 1)
     max_input_tokens = bounded_int(
@@ -343,6 +347,8 @@ def load_settings() -> Settings:
         max_tool_retries=max_tool_retries,
         max_step_retries=max_step_retries,
         max_total_tool_calls=max_total_tool_calls,
+        max_step_tool_calls=max_step_tool_calls,
+        max_direct_tool_calls=max_direct_tool_calls,
         monitor_enabled=monitor_enabled,
         monitor_database_url=monitor_database_url,
         monitor_table_prefix=os.environ.get("MONITOR_TABLE_PREFIX", "monitor").strip() or "monitor",

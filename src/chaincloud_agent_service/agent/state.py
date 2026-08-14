@@ -58,6 +58,7 @@ class AgentState(TypedDict):
     permission_failure: NotRequired[dict[str, Any] | None]
     direct_tool_call_count: NotRequired[int]
     step_tool_call_count: NotRequired[int]
+    step_tool_call_limit: NotRequired[int]
     step_retry_count: NotRequired[int]
     evaluation_action: NotRequired[
         Literal["pass", "retry", "replan", "partial", "fail"] | None

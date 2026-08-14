@@ -3,7 +3,7 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage
 
 from chaincloud_agent_service.agent.planning.models import Plan, PlanStep
-from chaincloud_agent_service.agent.planning.planner import create_plan
+from chaincloud_agent_service.agent.planning.planner import PLANNER_SYSTEM_PROMPT, create_plan
 from chaincloud_agent_service.agent.planning.validator import (
     PlanValidationError,
     validate_plan,
@@ -101,3 +101,9 @@ def test_create_plan_falls_back_to_single_step() -> None:
     assert plan.goal == "直接回答问题"
     assert len(plan.steps) == 1
     assert plan.steps[0].suggested_tools == []
+
+
+def test_planner_prompt_uses_flexible_four_call_default() -> None:
+    assert "默认应能在最多 4 次工具调用内完成" in PLANNER_SYSTEM_PROMPT
+    assert "budget_reason" in PLANNER_SYSTEM_PROMPT
+    assert "不要机械地把每次工具调用拆成单独步骤" in PLANNER_SYSTEM_PROMPT

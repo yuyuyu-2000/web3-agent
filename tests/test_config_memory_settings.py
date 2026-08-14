@@ -65,6 +65,18 @@ def test_load_settings_tool_result_compression(monkeypatch):
     assert settings.tool_result_preview_chars == 256
 
 
+def test_load_settings_tool_call_budgets(monkeypatch):
+    monkeypatch.setenv("MAX_TOTAL_TOOL_CALLS", "18")
+    monkeypatch.setenv("MAX_STEP_TOOL_CALLS", "7")
+    monkeypatch.setenv("MAX_DIRECT_TOOL_CALLS", "8")
+
+    settings = load_settings()
+
+    assert settings.max_total_tool_calls == 18
+    assert settings.max_step_tool_calls == 7
+    assert settings.max_direct_tool_calls == 8
+
+
 def test_load_settings_rolling_summary(monkeypatch):
     monkeypatch.setenv("ROLLING_SUMMARY_TRIGGER_RATIO", "0.6")
     monkeypatch.setenv("ROLLING_SUMMARY_RECENT_MESSAGES", "10")

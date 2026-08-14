@@ -45,6 +45,27 @@ def _format_tool_content(content: Any, max_chars: int) -> str:
     return _compact_text(raw, max_chars)
 
 
+def _safe_tool_args(message: Any, max_chars: int = 1200) -> str:
+    kwargs = getattr(message, "additional_kwargs", None)
+    metadata = kwargs.get("tool_result") if isinstance(kwargs, dict) else None
+    args = metadata.get("tool_args") if isinstance(metadata, dict) else None
+    if not isinstance(args, dict) or not args:
+        return ""
+    sensitive = {"password", "passwd", "secret", "token", "api_key", "authorization", "dsn", "database_url"}
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): "[REDACTED]" if str(key).lower() in sensitive else scrub(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    return _compact_text(json.dumps(scrub(args), ensure_ascii=False, default=str), max_chars)
+
+
 def build_answer_context(
     messages: list[Any], max_tool_chars: int = 1600, max_draft_chars: int = 3000
 ) -> str:
@@ -69,8 +90,12 @@ def build_answer_context(
             level = classify_tool_evidence_level(str(tool_name))
             label = evidence_level_label(level)
             formatted = _format_tool_content(content, max_tool_chars)
+            safe_args = _safe_tool_args(msg)
+            args_line = f"\n  调用参数: {safe_args}" if safe_args else ""
             tool_results.append(
-                f"- 工具: {tool_name}\n  证据等级: {label}\n  结果预览: {formatted}"
+                f"- 工具: {tool_name}\n  证据等级: {label}"
+                f"{args_line}"
+                f"\n  结果预览: {formatted}"
             )
             continue
 

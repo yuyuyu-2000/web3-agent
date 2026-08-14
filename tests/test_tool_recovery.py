@@ -84,6 +84,33 @@ def test_retry_respects_remaining_global_budget() -> None:
     assert payload["error_type"] == "budget_exhausted"
 
 
+def test_batch_executes_only_calls_that_fit_remaining_budget() -> None:
+    executed: list[int] = []
+
+    def lookup(value: int) -> str:
+        executed.append(value)
+        return f"ok:{value}"
+
+    tool = StructuredTool.from_function(lookup, name="lookup", description="lookup")
+    state = {
+        "messages": [
+            AIMessage(content="", tool_calls=[
+                {"name": "lookup", "args": {"value": 1}, "id": "call-1", "type": "tool_call"},
+                {"name": "lookup", "args": {"value": 2}, "id": "call-2", "type": "tool_call"},
+            ])
+        ]
+    }
+
+    result = RecoveringToolNode([tool], max_retries=0).invoke(
+        state, remaining_budget=1
+    )
+
+    assert executed == [1]
+    assert result["attempts"] == 1
+    assert result["messages"][0].content == "ok:1"
+    assert json.loads(result["messages"][1].content)["error_type"] == "budget_exhausted"
+
+
 def test_error_return_value_is_treated_as_failure() -> None:
     def lookup(value: int) -> dict:
         return {"status": "error", "error_type": "schema_error", "message": "字段不存在"}

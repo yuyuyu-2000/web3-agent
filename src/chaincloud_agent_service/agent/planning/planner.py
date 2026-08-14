@@ -27,7 +27,9 @@ JSON 格式：
       "depends_on": [],
       "requires_confirmation": false,
       "critical": true,
-      "fallback_tools": []
+      "fallback_tools": [],
+      "estimated_tool_calls": 4,
+      "budget_reason": ""
     }
   ]
 }
@@ -38,6 +40,10 @@ JSON 格式：
 4. Planner 不执行工具，也不直接回答用户问题。
 5. 创建、修改外部状态的步骤必须设置 requires_confirmation=true。
 6. critical 表示缺失该步骤结果是否会使目标无法可靠完成；有等价降级工具时写入 fallback_tools。
+7. 每个步骤默认应能在最多 4 次工具调用内完成；如果明确需要更多，estimated_tool_calls 可大于 4，并必须在 budget_reason 说明必要性。运行时只有全局剩余预算充足才会批准扩大。不要机械地把每次工具调用拆成单独步骤。
+8. 一个步骤只设一个主要、可验证的数据目标。定位数据源、确认结构、查询明细、统计分析如果合计会超过默认额度，应拆成有依赖关系的步骤。
+9. 已知表名时不要重复调用列举表工具；能够用一条聚合 SQL 同时确认日期覆盖、记录数和金额分布时，不要拆成多次探查。
+10. “大额”没有明确阈值时不要停止任务：优先采用 amount_usd >= 100000；若当日数据分布适合动态口径，可采用当日金额前 5%，并在最终结果中明确说明口径。
 """
 
 

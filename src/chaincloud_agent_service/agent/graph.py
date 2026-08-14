@@ -51,8 +51,9 @@ from chaincloud_agent_service.tools.registry import get_tools
 from chaincloud_agent_service.monitoring.runtime import bind_monitor_user, reset_monitor_user
 
 
-MAX_STEP_TOOL_CALLS = 4
-MAX_DIRECT_TOOL_CALLS = 4
+MAX_STEP_TOOL_CALLS = 6
+MAX_DIRECT_TOOL_CALLS = 6
+DEFAULT_PLAN_STEP_TOOL_CALLS = 4
 MAX_REPLANS = 1
 MAX_REVIEW_ATTEMPTS = 2
 
@@ -130,7 +131,7 @@ def _plan_from_state(state: AgentState) -> Plan:
     return Plan.model_validate(raw)
 
 
-def _step_execution_prompt(state: AgentState) -> str:
+def _step_execution_prompt(state: AgentState, *, max_step_tool_calls: int = MAX_STEP_TOOL_CALLS) -> str:
     plan = _plan_from_state(state)
     current_id = state.get("current_step_id")
     step = next(item for item in plan.steps if item.id == current_id)
@@ -150,7 +151,7 @@ def _step_execution_prompt(state: AgentState) -> str:
         f"允许的 fallback 工具：{', '.join(step.fallback_tools) or '无'}\n"
         f"依赖步骤结果：{json.dumps(dependencies, ensure_ascii=False)}\n"
         f"用户补充的执行状态：{json.dumps(state.get('clarified_state', {}), ensure_ascii=False)}\n"
-        f"本步骤剩余工具调用额度：{MAX_STEP_TOOL_CALLS - state.get('step_tool_call_count', 0)}\n"
+        f"本步骤剩余工具调用额度：{max_step_tool_calls - state.get('step_tool_call_count', 0)}\n"
         "需要数据时调用工具；已有足够信息时直接给出本步骤的结果摘要。"
     )
 
@@ -210,7 +211,9 @@ def compile_agent_graph(
     }
     max_tool_retries = int(getattr(settings, "max_tool_retries", 2))
     max_step_retries = int(getattr(settings, "max_step_retries", 2))
-    max_total_tool_calls = int(getattr(settings, "max_total_tool_calls", 12))
+    max_total_tool_calls = int(getattr(settings, "max_total_tool_calls", 16))
+    max_step_tool_calls = int(getattr(settings, "max_step_tool_calls", MAX_STEP_TOOL_CALLS))
+    max_direct_tool_calls = int(getattr(settings, "max_direct_tool_calls", MAX_DIRECT_TOOL_CALLS))
     result_store = FileToolResultStore(
         str(getattr(settings, "tool_result_store_path", "tool_results"))
     )
@@ -422,7 +425,7 @@ def compile_agent_graph(
             "当前请求已被路由为直接执行模式。请直接解决用户当前请求。"
             "需要数据时可以调用工具，但不要制定或展示任务计划。"
             f"本轮剩余工具调用额度："
-            f"{MAX_DIRECT_TOOL_CALLS - state.get('direct_tool_call_count', 0)}。"
+            f"{max_direct_tool_calls - state.get('direct_tool_call_count', 0)}。"
         )
         combined_prompt = "\n\n---\n\n".join(
             part for part in (system_prompt, direct_prompt) if part
@@ -449,7 +452,7 @@ def compile_agent_graph(
             return "complete_direct"
         if not tools:
             return "budget_exceeded"
-        if state.get("direct_tool_call_count", 0) + len(calls) > MAX_DIRECT_TOOL_CALLS:
+        if state.get("direct_tool_call_count", 0) >= max_direct_tool_calls:
             return "budget_exceeded"
         return "tools"
 
@@ -478,9 +481,21 @@ def compile_agent_graph(
             )
             if not dependencies_satisfied:
                 continue
+            requested_calls = int(getattr(step, "estimated_tool_calls", DEFAULT_PLAN_STEP_TOOL_CALLS))
+            has_explicit_reason = bool(str(getattr(step, "budget_reason", "")).strip())
+            requested_limit = (
+                requested_calls
+                if requested_calls > DEFAULT_PLAN_STEP_TOOL_CALLS and has_explicit_reason
+                else DEFAULT_PLAN_STEP_TOOL_CALLS
+            )
+            global_remaining = max(
+                0, max_total_tool_calls - int(state.get("tool_call_count", 0))
+            )
+            step_limit = min(max_step_tool_calls, requested_limit, global_remaining)
             return {
                 "current_step_id": step.id,
                 "step_tool_call_count": 0,
+                "step_tool_call_limit": step_limit,
                 "step_retry_count": 0,
                 "evaluation_action": None,
                 "evaluation_feedback": None,
@@ -589,7 +604,12 @@ def compile_agent_graph(
 
     def executor_node(state: AgentState) -> dict[str, list[Any]]:
         msgs: list[Any] = list(state["messages"])
-        execution_prompt = _step_execution_prompt(state)
+        execution_prompt = _step_execution_prompt(
+            state,
+            max_step_tool_calls=int(
+                state.get("step_tool_call_limit", DEFAULT_PLAN_STEP_TOOL_CALLS)
+            ),
+        )
         if state.get("evaluation_feedback"):
             execution_prompt += (
                 "\n上一次 Evaluator 反馈："
@@ -634,9 +654,10 @@ def compile_agent_graph(
             return "complete_step"
         if not tools:
             return "budget_exceeded"
-        if state.get("tool_call_count", 0) + len(calls) > max_total_tool_calls:
+        if state.get("tool_call_count", 0) >= max_total_tool_calls:
             return "budget_exceeded"
-        if state.get("step_tool_call_count", 0) + len(calls) > MAX_STEP_TOOL_CALLS:
+        step_limit = int(state.get("step_tool_call_limit", DEFAULT_PLAN_STEP_TOOL_CALLS))
+        if state.get("step_tool_call_count", 0) >= step_limit:
             return "budget_exceeded"
         return "tools"
 
@@ -644,9 +665,11 @@ def compile_agent_graph(
         assert tool_node is not None
         global_remaining = max(0, max_total_tool_calls - state.get("tool_call_count", 0))
         if state.get("execution_mode") == "direct":
-            mode_remaining = MAX_DIRECT_TOOL_CALLS - state.get("direct_tool_call_count", 0)
+            mode_remaining = max_direct_tool_calls - state.get("direct_tool_call_count", 0)
         else:
-            mode_remaining = MAX_STEP_TOOL_CALLS - state.get("step_tool_call_count", 0)
+            mode_remaining = int(
+                state.get("step_tool_call_limit", DEFAULT_PLAN_STEP_TOOL_CALLS)
+            ) - state.get("step_tool_call_count", 0)
         remaining = min(global_remaining, max(0, mode_remaining))
         fallback_tools: set[str] = set()
         if state.get("execution_mode") == "planned" and state.get("current_step_id"):
