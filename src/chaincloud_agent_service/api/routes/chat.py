@@ -67,6 +67,7 @@ class ChatResponse(BaseModel):
     execution_trace: dict[str, Any] | None = None
     permission_required: dict[str, Any] | None = None
     clarification_required: dict[str, Any] | None = None
+    monitor_draft_required: dict[str, Any] | None = None
 
 
 class PermissionApprovalRequest(BaseModel):
@@ -81,6 +82,13 @@ class ClarificationRequest(BaseModel):
     step_id: str = Field(..., min_length=1)
     values: dict[str, Any] = Field(default_factory=dict)
     decision: Literal["submit", "cancel"] = "submit"
+
+
+class MonitorDraftDecisionRequest(BaseModel):
+    thread_id: str = Field(..., min_length=1)
+    decision: Literal["confirm", "cancel"]
+    version: int = Field(..., ge=1)
+    draft_hash: str = Field(..., min_length=64, max_length=64)
 
 
 def _ndjson_event(event_type: str, **payload: Any) -> bytes:
@@ -98,6 +106,22 @@ def _result_metadata(result: dict[str, Any]) -> dict[str, Any]:
         "status": result.get("status"),
         "failure_reason": result.get("failure_reason"),
         "failed_tools": failed_tools or None,
+    }
+
+
+def _monitor_draft_response(state: dict[str, Any]) -> dict[str, Any] | None:
+    draft = state.get("pending_monitor_draft")
+    if state.get("monitor_draft_status") != "awaiting_confirmation" or not isinstance(draft, dict):
+        return None
+    missing = list(state.get("monitor_draft_missing_fields") or [])
+    return {
+        "status": "monitor_draft_required",
+        "draft": draft,
+        "summary": str(state.get("monitor_draft_summary") or ""),
+        "version": int(state.get("monitor_draft_version") or 0),
+        "draft_hash": str(state.get("monitor_draft_hash") or ""),
+        "missing_fields": missing,
+        "can_confirm": not missing,
     }
 
 
@@ -498,15 +522,68 @@ async def chat(
         _message_content_to_text(getattr(last, "content", "") if last else "")
     )
     text = _append_chart_urls(text, _extract_chart_urls(messages))
+    draft_response = _monitor_draft_response(result)
+    if draft_response and result.get("monitor_draft_action") in {"create", "revise", "stale"}:
+        text = ""
 
     if body.debug:
         return ChatResponse(
             reply=text,
             trace=extract_agent_trace(messages, max_preview_chars=body.trace_max_chars),
             execution_trace=execution_trace_from_state({**execution_context, **result}),
+            monitor_draft_required=draft_response,
             **_result_metadata(result),
         )
-    return ChatResponse(reply=text, **_result_metadata(result))
+    return ChatResponse(
+        reply=text,
+        monitor_draft_required=draft_response,
+        **_result_metadata(result),
+    )
+
+
+@router.post(
+    "/chat/monitor-draft",
+    response_model=ChatResponse,
+    response_model_exclude_none=True,
+)
+async def decide_monitor_draft(
+    request: Request,
+    body: MonitorDraftDecisionRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> ChatResponse:
+    current_user = optional_authenticated_user_or_static_auth(request, authorization)
+    if current_user is None:
+        raise HTTPException(status_code=401, detail="监控任务确认需要登录用户")
+    graph = request.app.state.graph
+    config = {"configurable": {"thread_id": body.thread_id}}
+    snapshot = await graph.aget_state(config)
+    state = dict(snapshot.values or {})
+    if state.get("monitor_draft_status") != "awaiting_confirmation":
+        raise HTTPException(status_code=409, detail="当前线程没有待确认的监控草稿")
+    if state.get("monitor_draft_user_id") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="无权操作该监控草稿")
+    result = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="确认" if body.decision == "confirm" else "取消")],
+            "user_id": current_user.user_id,
+            "monitor_draft_requested_version": body.version,
+            "monitor_draft_requested_hash": body.draft_hash,
+        },
+        config=config,
+    )
+    messages = result.get("messages", [])
+    last = messages[-1] if messages else None
+    text = _strip_reasoning_blocks(
+        _message_content_to_text(getattr(last, "content", "") if last else "")
+    )
+    draft_response = _monitor_draft_response(result)
+    if draft_response and result.get("monitor_draft_action") in {"create", "revise", "stale"}:
+        text = ""
+    return ChatResponse(
+        reply=text,
+        monitor_draft_required=draft_response,
+        **_result_metadata(result),
+    )
 
 
 @router.post(
@@ -734,6 +811,11 @@ async def chat_stream(
                             source=update.get("route_source", "fallback"),
                             reason=update.get("route_reason", ""),
                         )
+                    elif node_name in {"monitor_draft_create", "monitor_draft_revise", "monitor_draft_stale"} and isinstance(update, dict):
+                        draft_payload = _monitor_draft_response(update)
+                        if draft_payload:
+                            yield _ndjson_event("monitor_draft_required", **draft_payload)
+                            awaiting_clarification = True
                     elif node_name == "prepare_request" and isinstance(update, dict):
                         if update.get("route_action") in {"resume", "cancel"}:
                             yield _ndjson_event(

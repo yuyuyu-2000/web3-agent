@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   API_BASE_URL,
+  decideMonitorDraft,
   decidePermission,
   getCurrentUser,
   getMemories,
@@ -19,6 +20,7 @@ import type {
   ExecutionProgressEvent,
   ExecutionTrace,
   MemoryRecord,
+  MonitorDraftRequest,
   PermissionRequest,
   ToolInfo,
   UserResponse
@@ -597,6 +599,7 @@ export default function App() {
   const [summarizing, setSummarizing] = useState(false);
   const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
   const [pendingClarification, setPendingClarification] = useState<ClarificationRequest | null>(null);
+  const [pendingMonitorDraft, setPendingMonitorDraft] = useState<MonitorDraftRequest | null>(null);
   const [clarificationValues, setClarificationValues] = useState<Record<string, string>>({});
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const AUTO_SUMMARIZE_THRESHOLD = 8;
@@ -679,6 +682,7 @@ export default function App() {
     setMemoryKey(makeMemoryKey(auth.user.username));
     setPendingPermission(null);
     setPendingClarification(null);
+    setPendingMonitorDraft(null);
     setClarificationValues({});
     setMessages((prev) => [
       ...prev,
@@ -698,6 +702,7 @@ export default function App() {
     setMemoryKey(makeMemoryKey());
     setPendingPermission(null);
     setPendingClarification(null);
+    setPendingMonitorDraft(null);
     setClarificationValues({});
     setMessages((prev) => [
       ...prev,
@@ -755,6 +760,9 @@ export default function App() {
           } else if (event.type === "clarification_required") {
             setPendingClarification(event);
             setClarificationValues({});
+            setMessages((prev) => prev.filter((item) => item.id !== assistantId));
+          } else if (event.type === "monitor_draft_required") {
+            setPendingMonitorDraft(event);
             setMessages((prev) => prev.filter((item) => item.id !== assistantId));
           } else if (event.type === "status") {
             setMessages((prev) => prev.map((message) =>
@@ -828,6 +836,27 @@ export default function App() {
       setMessages((prev) => [
         ...prev,
         { id: newId("error"), role: "error", content: `审批失败：${message}` }
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleMonitorDraftDecision(decision: "confirm" | "cancel") {
+    if (!pendingMonitorDraft || loading) return;
+    const draft = pendingMonitorDraft;
+    setLoading(true);
+    try {
+      const response = await decideMonitorDraft(threadId, draft, decision, authToken);
+      setPendingMonitorDraft(response.monitor_draft_required || null);
+      if (response.reply) {
+        setMessages((prev) => [...prev, ...buildAssistantMessages(response.reply, response.trace)]);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setMessages((prev) => [
+        ...prev,
+        { id: newId("error"), role: "error", content: `监控任务操作失败：${message}` }
       ]);
     } finally {
       setLoading(false);
@@ -1124,6 +1153,42 @@ export default function App() {
                 <button type="button" className="primary" disabled={loading} onClick={() => void handlePermissionDecision("approve")}>确认执行</button>
                 <button type="button" disabled={loading} onClick={() => void handlePermissionDecision("cancel")}>取消</button>
               </div>
+            </article>
+          ) : null}
+          {pendingMonitorDraft ? (
+            <article className="permission-card monitor-draft-card">
+              <div className="permission-card-header">
+                <strong>监控任务预览</strong>
+                <span className="draft-version">v{pendingMonitorDraft.version}</span>
+              </div>
+              <p>{pendingMonitorDraft.summary}</p>
+              <dl>
+                <dt>类型</dt><dd>{pendingMonitorDraft.draft.rule_type}</dd>
+                <dt>协议</dt><dd>{pendingMonitorDraft.draft.protocol || "未限制"}</dd>
+                <dt>链</dt><dd>{pendingMonitorDraft.draft.chain || "未限制"}</dd>
+                <dt>地址</dt><dd>{pendingMonitorDraft.draft.address || "未限制"}</dd>
+                <dt>Token</dt><dd>{pendingMonitorDraft.draft.token || "未限制"}</dd>
+                <dt>金额阈值</dt>
+                <dd>{pendingMonitorDraft.draft.min_amount_usd != null
+                  ? `${pendingMonitorDraft.draft.min_amount_usd.toLocaleString()} USD`
+                  : pendingMonitorDraft.draft.min_amount != null
+                    ? pendingMonitorDraft.draft.min_amount.toLocaleString()
+                    : "未设置"}</dd>
+                <dt>通知方式</dt><dd>{pendingMonitorDraft.draft.notification_channel}</dd>
+              </dl>
+              {pendingMonitorDraft.missing_fields.length ? (
+                <ul className="draft-errors">
+                  {pendingMonitorDraft.missing_fields.map((item) => (
+                    <li key={item.field}>{item.reason}</li>
+                  ))}
+                </ul>
+              ) : null}
+              <div className="permission-actions">
+                <button type="button" className="primary" disabled={loading || !pendingMonitorDraft.can_confirm || !authToken} onClick={() => void handleMonitorDraftDecision("confirm")}>确认创建</button>
+                <button type="button" disabled={loading} onClick={() => document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus()}>修改</button>
+                <button type="button" disabled={loading || !authToken} onClick={() => void handleMonitorDraftDecision("cancel")}>取消</button>
+              </div>
+              <small>修改时直接在下方输入框描述变更，未提及字段将保持不变。</small>
             </article>
           ) : null}
           {pendingClarification ? (

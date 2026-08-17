@@ -51,6 +51,20 @@ class AgentState(TypedDict):
     state_validation: NotRequired[dict[str, Any] | None]
     state_validation_action: NotRequired[Literal["VALID", "MISSING"] | None]
     block_resolution: NotRequired[Literal["clarification", "partial", "fail"] | None]
+    pending_monitor_draft: NotRequired[dict[str, Any] | None]
+    monitor_draft_version: NotRequired[int | None]
+    monitor_draft_status: NotRequired[
+        Literal["awaiting_confirmation", "confirmed", "cancelled"] | None
+    ]
+    monitor_draft_summary: NotRequired[str | None]
+    monitor_draft_hash: NotRequired[str | None]
+    monitor_draft_missing_fields: NotRequired[list[dict[str, str]]]
+    monitor_draft_user_id: NotRequired[str | None]
+    monitor_draft_action: NotRequired[
+        Literal["create", "revise", "confirm", "cancel", "stale"] | None
+    ]
+    monitor_draft_requested_version: NotRequired[int | None]
+    monitor_draft_requested_hash: NotRequired[str | None]
     step_results: NotRequired[list[dict[str, Any]]]
     candidate_step_result: NotRequired[dict[str, Any] | None]
     step_message_start: NotRequired[int]

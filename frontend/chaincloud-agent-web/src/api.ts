@@ -7,6 +7,7 @@ import type {
   LoginRequest,
   MemoryListResponse,
   MemoryRecord,
+  MonitorDraftRequest,
   PermissionRequest,
   RegisterRequest,
   ToolListResponse,
@@ -121,6 +122,27 @@ export function decidePermission(
         step_id: permission.step_id,
         tool_name: permission.tool_name,
         decision
+      })
+    },
+    authToken ? { authToken, useStaticToken: false } : {}
+  );
+}
+
+export function decideMonitorDraft(
+  threadId: string,
+  draft: MonitorDraftRequest,
+  decision: "confirm" | "cancel",
+  authToken?: string
+): Promise<ChatResponse> {
+  return requestJson<ChatResponse>(
+    "/chat/monitor-draft",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        thread_id: threadId,
+        decision,
+        version: draft.version,
+        draft_hash: draft.draft_hash
       })
     },
     authToken ? { authToken, useStaticToken: false } : {}

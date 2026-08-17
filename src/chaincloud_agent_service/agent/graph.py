@@ -35,6 +35,15 @@ from chaincloud_agent_service.agent.routing.router import ROUTER_SYSTEM_PROMPT
 from chaincloud_agent_service.agent.schema_context import build_agent_system_prompt
 from chaincloud_agent_service.agent.state import AgentState
 from chaincloud_agent_service.agent.state_validation import validate_step_state
+from chaincloud_agent_service.agent.monitor_draft import (
+    create_monitor_draft,
+    is_monitor_creation_request,
+    is_monitor_topic_switch,
+    monitor_draft_hash,
+    monitor_draft_summary,
+    revise_monitor_draft,
+    validate_monitor_draft,
+)
 from chaincloud_agent_service.agent.tool_recovery import RecoveringToolNode, parse_tool_error
 from chaincloud_agent_service.agent.tool_results import (
     FileToolResultStore,
@@ -49,6 +58,7 @@ from chaincloud_agent_service.observability.trace import (
 )
 from chaincloud_agent_service.tools.registry import get_tools
 from chaincloud_agent_service.monitoring.runtime import bind_monitor_user, reset_monitor_user
+from chaincloud_agent_service.tools.monitor_tools import create_monitor_rule_from_draft
 
 
 MAX_STEP_TOOL_CALLS = 6
@@ -240,6 +250,31 @@ def compile_agent_graph(
             projected_tokens=context_builder.counter.text(system_prompt),
         )
         goal = _latest_user_question(list(state["messages"]))
+        pending_draft = state.get("pending_monitor_draft")
+        if (
+            isinstance(pending_draft, dict)
+            and state.get("monitor_draft_status") == "awaiting_confirmation"
+        ):
+            if _is_confirmation(goal):
+                requested_version = state.get("monitor_draft_requested_version")
+                requested_hash = state.get("monitor_draft_requested_hash")
+                current_version = int(state.get("monitor_draft_version") or 0)
+                current_hash = str(state.get("monitor_draft_hash") or "")
+                stale = (
+                    (requested_version is not None and requested_version != current_version)
+                    or (requested_hash is not None and requested_hash != current_hash)
+                )
+                return {
+                    **compact_update,
+                    "route_action": "monitor_draft_stale" if stale else "monitor_draft_confirm",
+                    "monitor_draft_action": "stale" if stale else "confirm",
+                }
+            if _is_cancellation(goal) or goal.strip().lower().rstrip("。.!！") in {"算了", "不要创建了"}:
+                return {**compact_update, "route_action": "monitor_draft_cancel", "monitor_draft_action": "cancel"}
+            if not is_monitor_topic_switch(goal):
+                return {**compact_update, "route_action": "monitor_draft_revise", "monitor_draft_action": "revise"}
+        if "create_monitor_rule" in available_tool_names and is_monitor_creation_request(goal):
+            return {**compact_update, "route_action": "monitor_draft_create", "monitor_draft_action": "create"}
         if state.get("status") == "blocked_missing_state":
             if _is_cancellation(goal):
                 return {**compact_update,
@@ -295,10 +330,125 @@ def compile_agent_graph(
                     "status": "failed",
                     "failure_reason": "用户已取消执行",
                 }
-        return {**compact_update, "route_action": "route"}
+        return {**compact_update, "route_action": "route", "monitor_draft_action": None}
 
     def prepare_request_route(state: AgentState) -> str:
         return state.get("route_action", "route")
+
+    def draft_payload(state: AgentState, draft: dict[str, Any], version: int) -> dict[str, Any]:
+        missing = validate_monitor_draft(draft)
+        summary = monitor_draft_summary(draft)
+        digest = monitor_draft_hash(draft, version)
+        return {
+            "pending_monitor_draft": draft,
+            "monitor_draft_version": version,
+            "monitor_draft_status": "awaiting_confirmation",
+            "monitor_draft_summary": summary,
+            "monitor_draft_hash": digest,
+            "monitor_draft_missing_fields": missing,
+            "monitor_draft_user_id": state.get("user_id"),
+            "monitor_draft_requested_version": None,
+            "monitor_draft_requested_hash": None,
+            "status": "completed",
+            "failure_reason": None,
+        }
+
+    def monitor_draft_create_node(state: AgentState) -> dict[str, Any]:
+        draft = create_monitor_draft(base_model, _latest_user_question(list(state["messages"])))
+        update = draft_payload(state, draft, 1)
+        append_trace_event(state, update, "decision_events", {
+            "trace_id": state.get("trace_id"), "thread_id": state.get("trace_thread_id"),
+            "decision_type": "monitor_draft", "action": "monitor_draft_created",
+            "monitor_draft_version": 1,
+        })
+        if update["monitor_draft_missing_fields"]:
+            append_trace_event(state, update, "error_events", {
+                "trace_id": state.get("trace_id"), "thread_id": state.get("trace_thread_id"),
+                "source": "monitor_draft", "error_type": "monitor_draft_validation_failed",
+                "retryable": True,
+            })
+        return update
+
+    def monitor_draft_revise_node(state: AgentState) -> dict[str, Any]:
+        current = dict(state.get("pending_monitor_draft") or {})
+        version = int(state.get("monitor_draft_version") or 0) + 1
+        draft = revise_monitor_draft(
+            base_model, current, _latest_user_question(list(state["messages"]))
+        )
+        update = draft_payload(state, draft, version)
+        append_trace_event(state, update, "decision_events", {
+            "trace_id": state.get("trace_id"), "thread_id": state.get("trace_thread_id"),
+            "decision_type": "monitor_draft", "action": "monitor_draft_revised",
+            "monitor_draft_version": version,
+        })
+        if update["monitor_draft_missing_fields"]:
+            append_trace_event(state, update, "error_events", {
+                "trace_id": state.get("trace_id"), "thread_id": state.get("trace_thread_id"),
+                "source": "monitor_draft", "error_type": "monitor_draft_validation_failed",
+                "retryable": True,
+            })
+        return update
+
+    def monitor_draft_confirm_node(state: AgentState) -> dict[str, Any]:
+        draft = dict(state.get("pending_monitor_draft") or {})
+        missing = validate_monitor_draft(draft)
+        owner = state.get("monitor_draft_user_id")
+        user_id = state.get("user_id")
+        if not user_id or owner != user_id:
+            return {
+                "monitor_draft_missing_fields": [{"field": "user_id", "reason": "草稿不属于当前登录用户"}],
+                "monitor_draft_status": "awaiting_confirmation", "status": "completed",
+                "failure_reason": "草稿用户校验失败",
+            }
+        if missing:
+            update: dict[str, Any] = {
+                "monitor_draft_missing_fields": missing,
+                "monitor_draft_status": "awaiting_confirmation", "status": "completed",
+                "failure_reason": "监控草稿缺少必要字段，不能确认创建",
+            }
+            append_trace_event(state, update, "error_events", {
+                "trace_id": state.get("trace_id"), "thread_id": state.get("trace_thread_id"),
+                "source": "monitor_draft", "error_type": "monitor_draft_validation_failed",
+                "retryable": True,
+            })
+            return update
+        created = create_monitor_rule_from_draft(draft, user_id=user_id)
+        rule_id = str((created.get("rule") or {}).get("rule_id") or "")
+        update = {
+            "messages": [AIMessage(content=f"监控任务已确认并创建，规则 ID：{rule_id}")],
+            "pending_monitor_draft": None,
+            "monitor_draft_status": "confirmed",
+            "monitor_draft_missing_fields": [],
+            "monitor_draft_requested_version": None,
+            "monitor_draft_requested_hash": None,
+            "status": "completed", "failure_reason": None,
+        }
+        append_trace_event(state, update, "decision_events", {
+            "trace_id": state.get("trace_id"), "thread_id": state.get("trace_thread_id"),
+            "decision_type": "monitor_draft", "action": "monitor_draft_confirmed",
+            "monitor_draft_version": state.get("monitor_draft_version"), "rule_id": rule_id,
+        })
+        return update
+
+    def monitor_draft_cancel_node(state: AgentState) -> dict[str, Any]:
+        update: dict[str, Any] = {
+            "messages": [AIMessage(content="已取消监控任务草稿，未创建正式规则。")],
+            "pending_monitor_draft": None, "monitor_draft_status": "cancelled",
+            "monitor_draft_missing_fields": [], "monitor_draft_requested_version": None,
+            "monitor_draft_requested_hash": None, "status": "completed", "failure_reason": None,
+        }
+        append_trace_event(state, update, "decision_events", {
+            "trace_id": state.get("trace_id"), "thread_id": state.get("trace_thread_id"),
+            "decision_type": "monitor_draft", "action": "monitor_draft_cancelled",
+            "monitor_draft_version": state.get("monitor_draft_version"),
+        })
+        return update
+
+    def monitor_draft_stale_node(state: AgentState) -> dict[str, Any]:
+        return {
+            "monitor_draft_requested_version": None, "monitor_draft_requested_hash": None,
+            "status": "completed", "failure_reason": "草稿版本已更新，请确认当前最新版本",
+        }
 
     def router_node(state: AgentState) -> dict[str, Any]:
         messages = list(state["messages"])
@@ -450,6 +600,8 @@ def compile_agent_graph(
         calls = _tool_calls(messages[-1]) if messages else []
         if not calls:
             return "complete_direct"
+        if any(_call_field(call, "name") == "create_monitor_rule" for call in calls):
+            return "monitor_draft"
         if not tools:
             return "budget_exceeded"
         if state.get("direct_tool_call_count", 0) >= max_direct_tool_calls:
@@ -528,6 +680,11 @@ def compile_agent_graph(
         plan = _plan_from_state(state)
         current_step_id = state.get("current_step_id")
         step = next(item for item in plan.steps if item.id == current_step_id)
+        if "create_monitor_rule" in step.suggested_tools:
+            return {
+                "permission_action": None, "pending_permission": None,
+                "monitor_draft_action": "create", "status": "planning",
+            }
         decision = evaluate_step_permission(
             step, state.get("approved_permission_keys", [])
         )
@@ -565,6 +722,8 @@ def compile_agent_graph(
         return update
 
     def permission_gate_route(state: AgentState) -> str:
+        if state.get("monitor_draft_action") == "create":
+            return "draft"
         return "validate" if state.get("permission_action") == "ALLOW" else "finish"
 
     def state_validation_node(state: AgentState) -> dict[str, Any]:
@@ -652,6 +811,8 @@ def compile_agent_graph(
         calls = _tool_calls(messages[-1]) if messages else []
         if not calls:
             return "complete_step"
+        if any(_call_field(call, "name") == "create_monitor_rule" for call in calls):
+            return "monitor_draft"
         if not tools:
             return "budget_exceeded"
         if state.get("tool_call_count", 0) >= max_total_tool_calls:
@@ -1098,6 +1259,11 @@ def compile_agent_graph(
 
     builder = StateGraph(AgentState)
     builder.add_node("prepare_request", prepare_request_node)
+    builder.add_node("monitor_draft_create", monitor_draft_create_node)
+    builder.add_node("monitor_draft_revise", monitor_draft_revise_node)
+    builder.add_node("monitor_draft_confirm", monitor_draft_confirm_node)
+    builder.add_node("monitor_draft_cancel", monitor_draft_cancel_node)
+    builder.add_node("monitor_draft_stale", monitor_draft_stale_node)
     builder.add_node("router", traced_node("router", router_node))
     builder.add_node("direct_agent", traced_node("direct_agent", direct_agent_node))
     builder.add_node("complete_direct", complete_direct_node)
@@ -1128,8 +1294,18 @@ def compile_agent_graph(
             "resume": "select_step",
             "clarify": "state_validation",
             "cancel": "review_gate",
+            "monitor_draft_create": "monitor_draft_create",
+            "monitor_draft_revise": "monitor_draft_revise",
+            "monitor_draft_confirm": "monitor_draft_confirm",
+            "monitor_draft_cancel": "monitor_draft_cancel",
+            "monitor_draft_stale": "monitor_draft_stale",
         },
     )
+    builder.add_edge("monitor_draft_create", "execution_completed")
+    builder.add_edge("monitor_draft_revise", "execution_completed")
+    builder.add_edge("monitor_draft_confirm", "execution_completed")
+    builder.add_edge("monitor_draft_cancel", "execution_completed")
+    builder.add_edge("monitor_draft_stale", "execution_completed")
     builder.add_conditional_edges(
         "router",
         router_route,
@@ -1141,6 +1317,7 @@ def compile_agent_graph(
         {
             "complete_direct": "complete_direct",
             "budget_exceeded": "budget_exceeded",
+            "monitor_draft": "monitor_draft_create",
             **({"tools": "tools"} if tools else {}),
         },
     )
@@ -1154,7 +1331,7 @@ def compile_agent_graph(
     builder.add_conditional_edges(
         "permission_gate",
         permission_gate_route,
-        {"validate": "state_validation", "finish": "execution_completed"},
+        {"validate": "state_validation", "finish": "execution_completed", "draft": "monitor_draft_create"},
     )
     builder.add_conditional_edges(
         "state_validation",
@@ -1169,6 +1346,7 @@ def compile_agent_graph(
     executor_destinations = {
         "complete_step": "complete_step",
         "budget_exceeded": "budget_exceeded",
+        "monitor_draft": "monitor_draft_create",
     }
     if tools:
         executor_destinations["tools"] = "tools"

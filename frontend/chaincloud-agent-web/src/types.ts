@@ -81,6 +81,7 @@ export interface ChatResponse {
   trace?: ChatTraceEvent[];
   permission_required?: PermissionRequest;
   clarification_required?: ClarificationRequest;
+  monitor_draft_required?: MonitorDraftRequest;
 }
 
 export type ChatStreamEvent =
@@ -89,6 +90,7 @@ export type ChatStreamEvent =
   | { type: "done"; reply: string; trace?: ChatTraceEvent[]; execution_trace?: ExecutionTrace }
   | ({ type: "permission_required" } & PermissionRequest)
   | ({ type: "clarification_required" } & ClarificationRequest)
+  | ({ type: "monitor_draft_required" } & MonitorDraftRequest)
   | { type: "error"; message: string }
   | ExecutionProgressEvent;
 
@@ -113,6 +115,27 @@ export interface ClarificationRequest {
   resolution: "clarification" | "partial" | "fail";
   missing_state: MissingStateField[];
   reason: string;
+}
+
+export interface MonitorDraft {
+  rule_type: "address_transaction" | "large_transaction";
+  address: string | null;
+  min_amount: number | null;
+  min_amount_usd: number | null;
+  chain: string | null;
+  token: string | null;
+  notification_channel: string;
+  protocol?: string | null;
+}
+
+export interface MonitorDraftRequest {
+  status: "monitor_draft_required";
+  draft: MonitorDraft;
+  summary: string;
+  version: number;
+  draft_hash: string;
+  missing_fields: Array<{ field: string; reason: string }>;
+  can_confirm: boolean;
 }
 
 export interface MemoryRecord {
