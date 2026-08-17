@@ -9,6 +9,7 @@
 | `MODEL_CONTEXT_WINDOW` | 128000 | 模型完整上下文窗口 |
 | `MAX_INPUT_TOKENS` | 96000 | 单次模型调用允许的最大输入 |
 | `RESERVED_OUTPUT_TOKENS` | 8000 | 为模型输出预留的 token |
+| `MEMORY_RECALL_CONTEXT_TOKENS` | 4000 | 召回长期记忆的独立输入预算 |
 
 初始化时会强制执行：
 
@@ -46,7 +47,7 @@ POST /chat
 
 Evaluator 当前只消费一个结构化 `PlanStep + StepResult`，不读取增长的会话历史，
 因此不属于本阶段要求的六类 ContextBuilder 场景。长期记忆总结使用独立、已有固定
-输入上限的 Memory LLM；本阶段没有改变其显式总结和显式召回方式。
+输入上限的 Memory LLM；长期记忆总结仍为显式操作，召回同时支持显式 key 与 gated 自动召回。
 
 ## 3. 场景上下文
 
@@ -152,9 +153,8 @@ max_input_tokens = 80
 
 ## 7. 本阶段边界
 
-本实现没有加入：Rolling Summary、工具结果外部存储、Memory 自动召回或压缩质量
-Evaluator。相关能力可分别接入 `summary`、`evidence`、`memory` ContextPart，而无需改变
-现有场景入口和 token budget 核心。
+自动召回结果通过 `memory` ContextPart 接入，并同时受独立 memory budget 和全局 token
+budget 约束。Rolling Summary、工具结果外置与长期记忆仍保持独立职责。
 
 ## 8. Tool Result Compression
 
@@ -211,7 +211,7 @@ ContextBuilder 不使用固定“最近 3 条”规则：
 ## 9. Rolling Summary
 
 Rolling Summary 是当前 `thread_id` 的活跃上下文压缩，不是长期 Memory。长期 Memory
-仍由 `memory_key`、MemoryStore 和显式召回管理；Rolling Summary 存在 LangGraph
+仍由 MemoryStore、显式 `memory_key` 与 gated 自动召回管理；Rolling Summary 存在 LangGraph
 AgentState/checkpoint 中，只负责让同一线程长期运行时不再向模型重复发送全部历史。
 
 ### 状态字段

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
@@ -16,6 +17,7 @@ from starlette.responses import StreamingResponse
 
 from chaincloud_agent_service.api.auth import optional_authenticated_user_or_static_auth
 from chaincloud_agent_service.auth.store import UserRecord
+from chaincloud_agent_service.memory.service import MemoryService
 from chaincloud_agent_service.observability.trace import (
     ChatTraceEvent,
     execution_trace_from_state,
@@ -82,9 +84,9 @@ class ClarificationRequest(BaseModel):
 
 
 def _ndjson_event(event_type: str, **payload: Any) -> bytes:
-    return (json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n").encode(
-        "utf-8"
-    )
+    return (
+        json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
 
 
 def _result_metadata(result: dict[str, Any]) -> dict[str, Any]:
@@ -268,10 +270,31 @@ def _memory_belongs_to_user(record: Any, user: UserRecord) -> bool:
     ) or _memory_key_matches_legacy_user_prefix(getattr(record, "memory_key", ""), user)
 
 
-def _build_input_messages(
-    request: Request, body: ChatRequest, current_user: UserRecord | None = None
-) -> list[BaseMessage]:
+def _recall_topic_tokens(text: str) -> set[str]:
+    normalized = text.lower()
+    words = set(re.findall(r"[a-z0-9_]{3,}", normalized))
+    han = "".join(re.findall(r"[\u4e00-\u9fff]", normalized))
+    words.update(han[index : index + 2] for index in range(max(0, len(han) - 1)))
+    return words
+
+
+def _can_reuse_recalled_memories(message: str, previous_query: str) -> bool:
+    gated, _ = MemoryService.memory_recall_gate(message)
+    if gated:
+        return True
+    current = _recall_topic_tokens(message)
+    previous = _recall_topic_tokens(previous_query)
+    return bool(current and previous and len(current & previous) / len(current) >= 0.25)
+
+
+async def _build_input_messages(
+    request: Request,
+    body: ChatRequest,
+    current_user: UserRecord | None = None,
+    graph: Any | None = None,
+) -> tuple[list[BaseMessage], dict[str, Any]]:
     messages: list[BaseMessage] = []
+    update: dict[str, Any] = {}
 
     if body.memory_key:
         memory_service = getattr(request.app.state, "memory_service", None)
@@ -287,9 +310,140 @@ def _build_input_messages(
         ):
             raise HTTPException(status_code=404, detail="memory not found")
         messages.append(memory_service.build_memory_system_message_for_record(record))
+        update = {
+            "active_recalled_memories": [
+                {
+                    "memory_key": record.memory_key,
+                    "summary": record.summary,
+                    "metadata": record.metadata,
+                    "user_id": current_user.user_id if current_user else record.user_id,
+                }
+            ],
+            "recalled_memory_keys": [record.memory_key],
+            "memory_recall_query": body.message,
+            "memory_recall_events": [
+                {
+                    "memory_recall_triggered": False,
+                    "memory_recall_skipped_reason": "explicit_memory_key",
+                    "selected_memory_keys": [record.memory_key],
+                }
+            ],
+        }
+    elif current_user is not None:
+        memory_service = getattr(request.app.state, "memory_service", None)
+        settings = getattr(request.app.state, "settings", None)
+        started = time.monotonic()
+        event: dict[str, Any] = {
+            "memory_recall_triggered": False,
+            "memory_candidate_count": 0,
+            "memory_selected_count": 0,
+            "selected_memory_keys": [],
+        }
+        try:
+            snapshot_state: dict[str, Any] = {}
+            if graph is not None and hasattr(graph, "aget_state"):
+                snapshot = await graph.aget_state(
+                    {"configurable": {"thread_id": body.thread_id}}
+                )
+                snapshot_state = dict(getattr(snapshot, "values", None) or {})
+            reusable = [
+                item
+                for item in list(snapshot_state.get("active_recalled_memories") or [])
+                if isinstance(item, dict)
+                and (
+                    item.get("user_id") == current_user.user_id
+                    or (item.get("metadata") or {}).get("user_id")
+                    == current_user.user_id
+                )
+            ]
+            if reusable and _can_reuse_recalled_memories(
+                body.message, str(snapshot_state.get("memory_recall_query") or "")
+            ):
+                records = reusable[
+                    : int(getattr(settings, "memory_recall_selected_limit", 3))
+                ]
+                event["memory_recall_skipped_reason"] = "reused_thread_memories"
+            elif not bool(getattr(settings, "memory_recall_enabled", True)):
+                records = []
+                event["memory_recall_skipped_reason"] = "disabled"
+            else:
+                allowed, reason = memory_service.memory_recall_gate(body.message)
+                if not allowed:
+                    records = []
+                    event["memory_recall_skipped_reason"] = reason
+                else:
+                    event["memory_recall_triggered"] = True
+                    selected, candidate_count = (
+                        memory_service.recall_memories_with_stats(
+                            user_id=current_user.user_id,
+                            query=body.message,
+                            candidate_limit=int(
+                                getattr(settings, "memory_recall_candidate_limit", 5)
+                            ),
+                            selected_limit=int(
+                                getattr(settings, "memory_recall_selected_limit", 3)
+                            ),
+                            min_similarity=float(
+                                getattr(settings, "memory_recall_min_similarity", 0.72)
+                            ),
+                        )
+                    )
+                    records = [
+                        {
+                            "memory_key": item.record.memory_key,
+                            "summary": item.record.summary,
+                            "metadata": item.record.metadata,
+                            "user_id": current_user.user_id,
+                            "similarity": item.similarity,
+                            "final_score": item.final_score,
+                        }
+                        for item in selected
+                    ]
+                    event["memory_candidate_count"] = candidate_count
+                    if not records:
+                        event["memory_recall_skipped_reason"] = (
+                            "no_candidate_above_threshold"
+                        )
+            for item in records:
+                from chaincloud_agent_service.memory.models import MemoryRecord
+
+                record = MemoryRecord(
+                    memory_key=item["memory_key"],
+                    summary=item["summary"],
+                    source_thread_id=str(
+                        item.get("source_thread_id") or body.thread_id
+                    ),
+                    metadata=item.get("metadata") or {},
+                )
+                messages.append(
+                    memory_service.build_memory_system_message_for_record(record)
+                )
+            event["memory_selected_count"] = len(records)
+            event["selected_memory_keys"] = [item["memory_key"] for item in records]
+            event["scores"] = [
+                {
+                    "memory_key": item["memory_key"],
+                    "similarity": item.get("similarity"),
+                    "final_score": item.get("final_score"),
+                }
+                for item in records
+            ]
+            update = {
+                "active_recalled_memories": records,
+                "recalled_memory_keys": event["selected_memory_keys"],
+                "memory_recall_query": body.message,
+                "memory_recall_events": [event],
+            }
+        except Exception as exc:
+            event["memory_recall_skipped_reason"] = f"recall_error:{type(exc).__name__}"
+            update = {"memory_recall_events": [event]}
+        finally:
+            event["memory_recall_duration_ms"] = round(
+                (time.monotonic() - started) * 1000, 2
+            )
 
     messages.append(HumanMessage(content=body.message))
-    return messages
+    return messages, update
 
 
 @router.post("/chat", response_model=ChatResponse, response_model_exclude_none=True)
@@ -302,13 +456,21 @@ async def chat(
 
     graph = request.app.state.graph
     config = {"configurable": {"thread_id": body.thread_id}}
-    input_messages = _build_input_messages(request, body, current_user)
+    input_messages, memory_update = await _build_input_messages(
+        request, body, current_user, graph
+    )
     execution_context = new_execution_context(body.thread_id)
     user_context = {"user_id": current_user.user_id} if current_user else {}
 
     try:
         result = await graph.ainvoke(
-            {"messages": input_messages, "requested_mode": body.planning, **execution_context, **user_context},
+            {
+                "messages": input_messages,
+                "requested_mode": body.planning,
+                **execution_context,
+                **user_context,
+                **memory_update,
+            },
             config=config,
         )
     except APIStatusError as exc:
@@ -407,9 +569,7 @@ async def approve_permission(
     if result.get("status") == "blocked_missing_state" and isinstance(
         result.get("state_validation"), dict
     ):
-        return ChatResponse(
-            reply="", clarification_required=result["state_validation"]
-        )
+        return ChatResponse(reply="", clarification_required=result["state_validation"])
     messages = result.get("messages", [])
     last = messages[-1] if messages else None
     text = _strip_reasoning_blocks(
@@ -466,9 +626,7 @@ async def submit_clarification(
     if result.get("status") == "blocked_missing_state" and isinstance(
         result.get("state_validation"), dict
     ):
-        return ChatResponse(
-            reply="", clarification_required=result["state_validation"]
-        )
+        return ChatResponse(reply="", clarification_required=result["state_validation"])
     messages = result.get("messages", [])
     last = messages[-1] if messages else None
     text = _strip_reasoning_blocks(
@@ -488,7 +646,9 @@ async def chat_stream(
     current_user = optional_authenticated_user_or_static_auth(request, authorization)
     graph = request.app.state.graph
     config = {"configurable": {"thread_id": body.thread_id}}
-    input_messages = _build_input_messages(request, body, current_user)
+    input_messages, memory_update = await _build_input_messages(
+        request, body, current_user, graph
+    )
     execution_context = new_execution_context(body.thread_id)
     user_context = {"user_id": current_user.user_id} if current_user else {}
 
@@ -506,16 +666,21 @@ async def chat_stream(
 
         try:
             async for mode, data in graph.astream(
-                {"messages": input_messages, "requested_mode": body.planning, **execution_context, **user_context},
+                {
+                    "messages": input_messages,
+                    "requested_mode": body.planning,
+                    **execution_context,
+                    **user_context,
+                    **memory_update,
+                },
                 config=config,
                 stream_mode=["messages", "updates"],
             ):
                 if mode == "messages":
                     chunk, metadata = data
-                    if (
-                        metadata.get("langgraph_node") != "compose_answer"
-                        or not isinstance(chunk, AIMessageChunk)
-                    ):
+                    if metadata.get(
+                        "langgraph_node"
+                    ) != "compose_answer" or not isinstance(chunk, AIMessageChunk):
                         continue
                     if buffer_for_review:
                         continue
@@ -532,24 +697,36 @@ async def chat_stream(
                 for node_name, update in data.items():
                     if isinstance(update, dict):
                         for key in (
-                            "status", "failure_reason", "last_tool_errors",
-                            "permission_failure", "node_events", "tool_events",
-                            "decision_events", "error_events", "request_summary",
+                            "status",
+                            "failure_reason",
+                            "last_tool_errors",
+                            "permission_failure",
+                            "node_events",
+                            "tool_events",
+                            "decision_events",
+                            "error_events",
+                            "request_summary",
                         ):
                             if key in update:
                                 final_metadata[key] = update[key]
                         node_messages = update.get("messages", [])
                         if not isinstance(node_messages, list):
                             node_messages = [node_messages]
-                        messages.extend(message for message in node_messages if message is not None)
+                        messages.extend(
+                            message for message in node_messages if message is not None
+                        )
                         node_events = update.get("node_events", [])
                         if isinstance(node_events, list):
                             matching_events = [
-                                event for event in node_events
-                                if isinstance(event, dict) and event.get("node_name") == node_name
+                                event
+                                for event in node_events
+                                if isinstance(event, dict)
+                                and event.get("node_name") == node_name
                             ]
                             if matching_events:
-                                yield _ndjson_event("node_completed", **matching_events[-1])
+                                yield _ndjson_event(
+                                    "node_completed", **matching_events[-1]
+                                )
                     if node_name == "router" and isinstance(update, dict):
                         yield _ndjson_event(
                             "route_selected",
@@ -594,9 +771,9 @@ async def chat_stream(
                             risk_level=(pending or {}).get("risk_level", "none"),
                             reason=(pending or {}).get("reason", ""),
                         )
-                        if update.get("permission_action") == "NEED_CONFIRM" and isinstance(
-                            pending, dict
-                        ):
+                        if update.get(
+                            "permission_action"
+                        ) == "NEED_CONFIRM" and isinstance(pending, dict):
                             awaiting_permission = True
                             yield _ndjson_event("permission_required", **pending)
                         elif update.get("permission_action") == "DENY" and isinstance(
@@ -645,7 +822,10 @@ async def chat_stream(
                         if isinstance(update, dict):
                             current_events = update.get("tool_events", [])
                             for event in current_events:
-                                event_key = (str(event.get("tool_call_id", "")), int(event.get("attempt", 0)))
+                                event_key = (
+                                    str(event.get("tool_call_id", "")),
+                                    int(event.get("attempt", 0)),
+                                )
                                 if event_key in emitted_tool_events:
                                     continue
                                 emitted_tool_events.add(event_key)
@@ -653,8 +833,12 @@ async def chat_stream(
                                     yield _ndjson_event("tool_retry", **event)
                                 if event.get("recovered"):
                                     yield _ndjson_event("tool_recovered", **event)
-                        yield _ndjson_event("status", content="工具执行完成，正在整理结果...")
-                    elif node_name == "execution_completed" and isinstance(update, dict):
+                        yield _ndjson_event(
+                            "status", content="工具执行完成，正在整理结果..."
+                        )
+                    elif node_name == "execution_completed" and isinstance(
+                        update, dict
+                    ):
                         yield _ndjson_event(
                             "execution_completed",
                             **(update.get("request_summary") or {}),
@@ -678,7 +862,9 @@ async def chat_stream(
             reply = _strip_reasoning_blocks(
                 _message_content_to_text(getattr(last, "content", "") if last else "")
             )
-            reply = _append_chart_urls(reply or streamed_reply, _extract_chart_urls(messages))
+            reply = _append_chart_urls(
+                reply or streamed_reply, _extract_chart_urls(messages)
+            )
             if buffer_for_review and reply:
                 streamed_reply = reply
                 yield _ndjson_event("delta", content=reply)

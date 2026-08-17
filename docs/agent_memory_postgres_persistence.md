@@ -1,5 +1,9 @@
 # Local PostgreSQL Verification for Agent Memory
 
+> 启用自动语义召回前，请执行 `docs/sql/migrate_memory_semantic_recall.sql`。
+> 迁移只增加可空列，旧记录仍可通过 `memory_key` 显式读取；旧记录的 embedding
+> 可以后续批量补建。pgvector 不可用时，自动召回降级，不影响聊天主流程。
+
 This guide describes how to verify the PostgreSQL-backed Agent Memory feature in a local development environment.
 
 ## 1. Goal

@@ -19,6 +19,7 @@ EXECUTION_EVENT_KEYS = (
     "error_events",
     "context_events",
     "compact_events",
+    "memory_recall_events",
 )
 
 
@@ -113,6 +114,7 @@ def append_trace_event(
 
 def traced_node(node_name: str, function: Callable[..., Any]) -> Callable[..., Any]:
     """Wrap a sync LangGraph node and add one best-effort node event."""
+
     def wrapped(state: dict[str, Any], *args: Any, **kwargs: Any) -> dict[str, Any]:
         started = time.perf_counter()
         start_time = utc_now_iso()
@@ -123,7 +125,9 @@ def traced_node(node_name: str, function: Callable[..., Any]) -> Callable[..., A
             # redacted structured log so the failure location is still observable.
             logger.exception(
                 "agent node failed trace_id=%s thread_id=%s node=%s error_type=%s",
-                state.get("trace_id"), state.get("trace_thread_id"), node_name,
+                state.get("trace_id"),
+                state.get("trace_thread_id"),
+                node_name,
                 exc.__class__.__name__,
             )
             raise
@@ -142,6 +146,7 @@ def traced_node(node_name: str, function: Callable[..., Any]) -> Callable[..., A
             },
         )
         return update
+
     return wrapped
 
 
@@ -149,6 +154,7 @@ def traced_async_node(
     node_name: str, function: Callable[..., Awaitable[Any]]
 ) -> Callable[..., Awaitable[dict[str, Any]]]:
     """Async counterpart of :func:`traced_node`."""
+
     async def wrapped(
         state: dict[str, Any], *args: Any, **kwargs: Any
     ) -> dict[str, Any]:
@@ -159,20 +165,28 @@ def traced_async_node(
         except Exception as exc:
             logger.exception(
                 "agent node failed trace_id=%s thread_id=%s node=%s error_type=%s",
-                state.get("trace_id"), state.get("trace_thread_id"), node_name,
+                state.get("trace_id"),
+                state.get("trace_thread_id"),
+                node_name,
                 exc.__class__.__name__,
             )
             raise
         update = dict(result or {})
-        append_trace_event(state, update, "node_events", {
-            "trace_id": state.get("trace_id"),
-            "thread_id": state.get("trace_thread_id"),
-            "node_name": node_name,
-            "start_time": start_time,
-            "duration_ms": round((time.perf_counter() - started) * 1000, 3),
-            "status": "success",
-        })
+        append_trace_event(
+            state,
+            update,
+            "node_events",
+            {
+                "trace_id": state.get("trace_id"),
+                "thread_id": state.get("trace_thread_id"),
+                "node_name": node_name,
+                "start_time": start_time,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+                "status": "success",
+            },
+        )
         return update
+
     return wrapped
 
 
@@ -186,61 +200,95 @@ def build_request_summary(state: dict[str, Any]) -> dict[str, Any]:
     started = state.get("trace_started_monotonic")
     duration_ms = (
         round((time.monotonic() - float(started)) * 1000, 3)
-        if isinstance(started, (int, float)) else sum(float(e.get("duration_ms", 0)) for e in node_events)
+        if isinstance(started, (int, float))
+        else sum(float(e.get("duration_ms", 0)) for e in node_events)
     )
     status = state.get("status")
     if status == "completed":
         final_status = "success"
-    elif status in {"partial", "degraded", "waiting_confirmation", "blocked_missing_state"}:
+    elif status in {
+        "partial",
+        "degraded",
+        "waiting_confirmation",
+        "blocked_missing_state",
+    }:
         final_status = "partial" if status == "partial" else "degraded"
     else:
         final_status = "failed"
     llm_nodes = {"executor", "direct_agent", "evaluator", "compose_answer", "reviewer"}
     router_model_calls = sum(
-        1 for event in decision_events
+        1
+        for event in decision_events
         if event.get("decision_type") == "router" and event.get("source") == "model"
     )
     rolling_summary_calls = sum(
         1 for event in compact_events if event.get("status") in {"success", "failed"}
     )
-    return safe_trace_event({
-        "trace_id": state.get("trace_id"),
-        "thread_id": state.get("trace_thread_id"),
-        "total_duration_ms": duration_ms,
-        "llm_calls": (
-            sum(1 for event in node_events if event.get("node_name") in llm_nodes)
-            + int(state.get("planner_attempts", 0)) + router_model_calls
-            + rolling_summary_calls
-        ),
-        "tool_calls": sum(1 for event in tool_events if event.get("attempt") == 1),
-        "tool_retries": sum(1 for event in tool_events if int(event.get("attempt", 1)) > 1),
-        "step_retries": sum(1 for event in decision_events if event.get("decision_type") == "evaluator" and event.get("action") == "retry"),
-        "permission_checks": sum(1 for event in decision_events if event.get("decision_type") == "permission_gate"),
-        "fallbacks": sum(1 for event in tool_events if event.get("fallback_tool") and event.get("status") == "success"),
-        "errors": len(error_events),
-        "context_builds": len(context_events),
-        "context_trimmed_items": sum(len(event.get("trimmed", [])) for event in context_events),
-        "rolling_compacts": sum(1 for event in compact_events if event.get("status") == "success"),
-        "compact_failures": sum(1 for event in compact_events if event.get("status") == "failed"),
-        "rolling_summary_calls": rolling_summary_calls,
-        "final_status": final_status,
-    })
+    return safe_trace_event(
+        {
+            "trace_id": state.get("trace_id"),
+            "thread_id": state.get("trace_thread_id"),
+            "total_duration_ms": duration_ms,
+            "llm_calls": (
+                sum(1 for event in node_events if event.get("node_name") in llm_nodes)
+                + int(state.get("planner_attempts", 0))
+                + router_model_calls
+                + rolling_summary_calls
+            ),
+            "tool_calls": sum(1 for event in tool_events if event.get("attempt") == 1),
+            "tool_retries": sum(
+                1 for event in tool_events if int(event.get("attempt", 1)) > 1
+            ),
+            "step_retries": sum(
+                1
+                for event in decision_events
+                if event.get("decision_type") == "evaluator"
+                and event.get("action") == "retry"
+            ),
+            "permission_checks": sum(
+                1
+                for event in decision_events
+                if event.get("decision_type") == "permission_gate"
+            ),
+            "fallbacks": sum(
+                1
+                for event in tool_events
+                if event.get("fallback_tool") and event.get("status") == "success"
+            ),
+            "errors": len(error_events),
+            "context_builds": len(context_events),
+            "context_trimmed_items": sum(
+                len(event.get("trimmed", [])) for event in context_events
+            ),
+            "rolling_compacts": sum(
+                1 for event in compact_events if event.get("status") == "success"
+            ),
+            "compact_failures": sum(
+                1 for event in compact_events if event.get("status") == "failed"
+            ),
+            "rolling_summary_calls": rolling_summary_calls,
+            "final_status": final_status,
+        }
+    )
 
 
 def execution_trace_from_state(state: dict[str, Any]) -> dict[str, Any]:
-    return safe_trace_event({
-        "trace_id": state.get("trace_id"),
-        "thread_id": state.get("trace_thread_id"),
-        **{key: list(state.get(key, [])) for key in EXECUTION_EVENT_KEYS},
-        "tool_result_records": list(state.get("tool_result_records", [])),
-        "rolling_summary": {
-            "summary_version": state.get("summary_version", 0),
-            "summarized_until": state.get("summarized_until", 0),
-            "summary_updated_at": state.get("summary_updated_at"),
-            "compact_failure_count": state.get("compact_failure_count", 0),
-        },
-        "request_summary": state.get("request_summary") or build_request_summary(state),
-    })
+    return safe_trace_event(
+        {
+            "trace_id": state.get("trace_id"),
+            "thread_id": state.get("trace_thread_id"),
+            **{key: list(state.get(key, [])) for key in EXECUTION_EVENT_KEYS},
+            "tool_result_records": list(state.get("tool_result_records", [])),
+            "rolling_summary": {
+                "summary_version": state.get("summary_version", 0),
+                "summarized_until": state.get("summarized_until", 0),
+                "summary_updated_at": state.get("summary_updated_at"),
+                "compact_failure_count": state.get("compact_failure_count", 0),
+            },
+            "request_summary": state.get("request_summary")
+            or build_request_summary(state),
+        }
+    )
 
 
 def _preview(value: Any, max_len: int = 500) -> str:

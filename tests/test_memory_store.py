@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from chaincloud_agent_service.memory.models import MemoryRecord
-from chaincloud_agent_service.memory.store import InMemoryMemoryStore
+from chaincloud_agent_service.memory.store import InMemoryMemoryStore, PostgresMemoryStore
 
 
 def test_memory_record_requires_non_empty_key_and_thread_id() -> None:
@@ -98,3 +98,18 @@ def test_clear_removes_all_memory_records() -> None:
     assert store.list() == []
     assert store.get("user-a") is None
     assert store.get("user-b") is None
+
+
+def test_postgres_old_row_without_recall_columns_is_compatible() -> None:
+    store = PostgresMemoryStore(database_url="postgresql://unused", auto_create=False)
+    updated = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    record = store._row_to_record({  # noqa: SLF001 - compatibility unit test
+        "memory_key": "legacy",
+        "summary": "旧摘要",
+        "source_thread_id": "thread-old",
+        "metadata": {"user_id": "alice"},
+        "updated_at": updated,
+    })
+    assert record.memory_key == "legacy"
+    assert record.embedding is None
+    assert record.created_at == updated

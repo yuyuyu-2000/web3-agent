@@ -69,6 +69,12 @@ class Settings:
     memory_database_url: str | None
     memory_postgres_table: str
     memory_postgres_auto_create: bool
+    memory_recall_enabled: bool
+    memory_embedding_model: str
+    memory_recall_candidate_limit: int
+    memory_recall_selected_limit: int
+    memory_recall_min_similarity: float
+    memory_recall_context_tokens: int
     auth_database_url: str | None
     auth_users_table: str
     auth_postgres_auto_create: bool
@@ -176,10 +182,14 @@ def load_settings() -> Settings:
     max_step_tool_calls = bounded_int("MAX_STEP_TOOL_CALLS", 6, 1, 50)
     max_direct_tool_calls = bounded_int("MAX_DIRECT_TOOL_CALLS", 6, 1, 50)
     model_context_window = bounded_int("MODEL_CONTEXT_WINDOW", 128000, 1024, 2000000)
-    reserved_output_tokens = bounded_int("RESERVED_OUTPUT_TOKENS", 8000, 128, model_context_window - 1)
+    reserved_output_tokens = bounded_int(
+        "RESERVED_OUTPUT_TOKENS", 8000, 128, model_context_window - 1
+    )
     max_input_tokens = bounded_int(
-        "MAX_INPUT_TOKENS", min(96000, model_context_window - reserved_output_tokens),
-        256, model_context_window - reserved_output_tokens,
+        "MAX_INPUT_TOKENS",
+        min(96000, model_context_window - reserved_output_tokens),
+        256,
+        model_context_window - reserved_output_tokens,
     )
     tool_result_store_path = (
         os.environ.get("TOOL_RESULT_STORE_PATH", "tool_results").strip()
@@ -188,9 +198,7 @@ def load_settings() -> Settings:
     tool_result_compression_threshold_bytes = bounded_int(
         "TOOL_RESULT_COMPRESSION_THRESHOLD_BYTES", 16000, 256, 100000000
     )
-    tool_result_preview_chars = bounded_int(
-        "TOOL_RESULT_PREVIEW_CHARS", 1000, 0, 10000
-    )
+    tool_result_preview_chars = bounded_int("TOOL_RESULT_PREVIEW_CHARS", 1000, 0, 10000)
     try:
         rolling_summary_trigger_ratio = float(
             os.environ.get("ROLLING_SUMMARY_TRIGGER_RATIO", "0.70")
@@ -205,13 +213,18 @@ def load_settings() -> Settings:
         "ROLLING_SUMMARY_REACTIVE_RECENT_MESSAGES", 4, 1, 100
     )
     rolling_summary_max_input_tokens = bounded_int(
-        "ROLLING_SUMMARY_MAX_INPUT_TOKENS", min(32000, max_input_tokens),
-        512, max_input_tokens,
+        "ROLLING_SUMMARY_MAX_INPUT_TOKENS",
+        min(32000, max_input_tokens),
+        512,
+        max_input_tokens,
     )
-    rolling_summary_max_failures = bounded_int(
-        "ROLLING_SUMMARY_MAX_FAILURES", 3, 1, 10
+    rolling_summary_max_failures = bounded_int("ROLLING_SUMMARY_MAX_FAILURES", 3, 1, 10)
+    monitor_enabled = os.environ.get("MONITOR_ENABLED", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
     )
-    monitor_enabled = os.environ.get("MONITOR_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
     token = os.environ.get("CHAT_API_TOKEN", "").strip()
     web_search_enabled = os.environ.get("WEB_SEARCH_ENABLED", "0").strip().lower() in (
         "1",
@@ -269,6 +282,27 @@ def load_settings() -> Settings:
     memory_postgres_auto_create = os.environ.get(
         "MEMORY_POSTGRES_AUTO_CREATE", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
+    memory_recall_enabled = os.environ.get(
+        "MEMORY_RECALL_ENABLED", "1"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    memory_embedding_model = (
+        os.environ.get("MEMORY_EMBEDDING_MODEL", "text-embedding-3-small").strip()
+        or "text-embedding-3-small"
+    )
+    memory_recall_candidate_limit = bounded_int(
+        "MEMORY_RECALL_CANDIDATE_LIMIT", 5, 1, 20
+    )
+    memory_recall_selected_limit = bounded_int("MEMORY_RECALL_SELECTED_LIMIT", 3, 1, 3)
+    try:
+        memory_recall_min_similarity = float(
+            os.environ.get("MEMORY_RECALL_MIN_SIMILARITY", "0.72")
+        )
+    except ValueError:
+        memory_recall_min_similarity = 0.72
+    memory_recall_min_similarity = min(max(memory_recall_min_similarity, 0.0), 1.0)
+    memory_recall_context_tokens = bounded_int(
+        "MEMORY_RECALL_CONTEXT_TOKENS", 4000, 128, max_input_tokens
+    )
     auth_database_url = (
         os.environ.get("AUTH_DATABASE_URL", "").strip() or memory_database_url or None
     )
@@ -292,8 +326,12 @@ def load_settings() -> Settings:
         auth_token_expire_minutes = 5
     if auth_token_expire_minutes > 43200:
         auth_token_expire_minutes = 43200
-    monitor_database_url = os.environ.get("MONITOR_DATABASE_URL", "").strip() or auth_database_url
-    monitor_transaction_database_url = os.environ.get("MONITOR_TRANSACTION_DATABASE_URL", "").strip() or ro or None
+    monitor_database_url = (
+        os.environ.get("MONITOR_DATABASE_URL", "").strip() or auth_database_url
+    )
+    monitor_transaction_database_url = (
+        os.environ.get("MONITOR_TRANSACTION_DATABASE_URL", "").strip() or ro or None
+    )
     return Settings(
         database_url=database_url,
         readonly_database_url=ro or None,
@@ -339,6 +377,12 @@ def load_settings() -> Settings:
         memory_database_url=memory_database_url,
         memory_postgres_table=memory_postgres_table,
         memory_postgres_auto_create=memory_postgres_auto_create,
+        memory_recall_enabled=memory_recall_enabled,
+        memory_embedding_model=memory_embedding_model,
+        memory_recall_candidate_limit=memory_recall_candidate_limit,
+        memory_recall_selected_limit=memory_recall_selected_limit,
+        memory_recall_min_similarity=memory_recall_min_similarity,
+        memory_recall_context_tokens=memory_recall_context_tokens,
         auth_database_url=auth_database_url,
         auth_users_table=auth_users_table,
         auth_postgres_auto_create=auth_postgres_auto_create,
@@ -351,13 +395,22 @@ def load_settings() -> Settings:
         max_direct_tool_calls=max_direct_tool_calls,
         monitor_enabled=monitor_enabled,
         monitor_database_url=monitor_database_url,
-        monitor_table_prefix=os.environ.get("MONITOR_TABLE_PREFIX", "monitor").strip() or "monitor",
+        monitor_table_prefix=os.environ.get("MONITOR_TABLE_PREFIX", "monitor").strip()
+        or "monitor",
         monitor_scan_interval_sec=bounded_int("MONITOR_SCAN_INTERVAL_SEC", 30, 5, 3600),
         monitor_transaction_database_url=monitor_transaction_database_url,
-        monitor_transaction_table=os.environ.get("MONITOR_TRANSACTION_TABLE", "transactions").strip() or "transactions",
-        monitor_transaction_columns=os.environ.get("MONITOR_TRANSACTION_COLUMNS", "").strip(),
+        monitor_transaction_table=os.environ.get(
+            "MONITOR_TRANSACTION_TABLE", "transactions"
+        ).strip()
+        or "transactions",
+        monitor_transaction_columns=os.environ.get(
+            "MONITOR_TRANSACTION_COLUMNS", ""
+        ).strip(),
         monitor_scan_batch_size=bounded_int("MONITOR_SCAN_BATCH_SIZE", 1000, 1, 10000),
-        monitor_process_existing=os.environ.get("MONITOR_PROCESS_EXISTING", "0").strip().lower() in ("1", "true", "yes", "on"),
+        monitor_process_existing=os.environ.get("MONITOR_PROCESS_EXISTING", "0")
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
         planned_reviewer_low_model=planned_reviewer_low_model,
         planned_reviewer_high_model=planned_reviewer_high_model,
     )

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from chaincloud_agent_service.agent.graph import compile_agent_graph
 from chaincloud_agent_service.auth import AuthService, create_user_store
@@ -27,7 +27,11 @@ from chaincloud_agent_service.persistence.checkpoint import (
 )
 from chaincloud_agent_service.tools.scheduler_runtime import start_scheduler
 from chaincloud_agent_service.tools.scheduler_runtime import add_monitor_scan_job
-from chaincloud_agent_service.monitoring import MonitorStore, MonitorWorker, PostgresTransactionSource
+from chaincloud_agent_service.monitoring import (
+    MonitorStore,
+    MonitorWorker,
+    PostgresTransactionSource,
+)
 from chaincloud_agent_service.monitoring.runtime import configure_monitor_store
 from chaincloud_agent_service.notification import FeishuNotifier, NotificationService
 
@@ -52,21 +56,36 @@ def _configure_monitoring(app: FastAPI, settings) -> None:
     if not settings.monitor_enabled:
         configure_monitor_store(None)
         return
-    if not settings.monitor_database_url or not settings.monitor_transaction_database_url:
-        raise RuntimeError("MONITOR_ENABLED requires monitor and transaction database URLs")
-    store = MonitorStore(settings.monitor_database_url, prefix=settings.monitor_table_prefix)
+    if (
+        not settings.monitor_database_url
+        or not settings.monitor_transaction_database_url
+    ):
+        raise RuntimeError(
+            "MONITOR_ENABLED requires monitor and transaction database URLs"
+        )
+    store = MonitorStore(
+        settings.monitor_database_url, prefix=settings.monitor_table_prefix
+    )
     store.ensure_schema()
     configure_monitor_store(store)
     default_columns = {
-        "id": "id", "hash": "transaction_hash", "from_address": "from_address",
-        "to_address": "to_address", "amount": "amount", "amount_usd": "amount_usd",
-        "chain": "chain", "token": "token", "occurred_at": "created_at",
+        "id": "id",
+        "hash": "transaction_hash",
+        "from_address": "from_address",
+        "to_address": "to_address",
+        "amount": "amount",
+        "amount_usd": "amount_usd",
+        "chain": "chain",
+        "token": "token",
+        "occurred_at": "created_at",
     }
     if settings.monitor_transaction_columns:
         default_columns.update(json.loads(settings.monitor_transaction_columns))
     source = PostgresTransactionSource(
-        settings.monitor_transaction_database_url, table=settings.monitor_transaction_table,
-        columns=default_columns, batch_size=settings.monitor_scan_batch_size,
+        settings.monitor_transaction_database_url,
+        table=settings.monitor_transaction_table,
+        columns=default_columns,
+        batch_size=settings.monitor_scan_batch_size,
         process_existing_on_first_run=settings.monitor_process_existing,
     )
     notifications = NotificationService({"feishu": FeishuNotifier()})
@@ -82,13 +101,29 @@ def _configure_monitoring(app: FastAPI, settings) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    settings = load_settings() #加载配置
+    settings = load_settings()  # 加载配置
     if not settings.openai_api_key:
         raise RuntimeError("缺少环境变量 OPENAI_API_KEY")
 
-    memory_store = create_memory_store(settings) #memory_store是底层存储
-    memory_service = MemoryService(memory_store)
-    memory_llm = ChatOpenAI(   #提供总结记忆功能
+    memory_store = create_memory_store(settings)  # memory_store是底层存储
+    if settings.memory_recall_enabled and hasattr(
+        memory_store, "migrate_for_semantic_recall"
+    ):
+        try:
+            memory_store.migrate_for_semantic_recall()
+        except Exception:
+            pass
+    embedding_provider = (
+        OpenAIEmbeddings(
+            model=settings.memory_embedding_model,
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+        )
+        if settings.memory_recall_enabled
+        else None
+    )
+    memory_service = MemoryService(memory_store, embedding_provider=embedding_provider)
+    memory_llm = ChatOpenAI(  # 提供总结记忆功能
         model=settings.openai_model,
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
@@ -96,7 +131,7 @@ async def lifespan(app: FastAPI):
         max_retries=settings.openai_max_retries,
     )
 
-    auth_store = create_user_store(settings) 
+    auth_store = create_user_store(settings)
     auth_service = AuthService(
         auth_store,
         token_secret=settings.auth_token_secret,
@@ -116,9 +151,9 @@ async def lifespan(app: FastAPI):
         if isinstance(content, str):
             return content
         return str(content)
-    
-    #checkpoint：按 thread_id 自动保存聊天上下文。
-    if settings.database_url:  #初始化会话checkpointer，数据库模式下使用postgres_checkpointer，内存模式下使用memory_checkpointer
+
+    # checkpoint：按 thread_id 自动保存聊天上下文。
+    if settings.database_url:  # 初始化会话checkpointer，数据库模式下使用postgres_checkpointer，内存模式下使用memory_checkpointer
         async with postgres_checkpointer(settings.database_url) as checkpointer:
             graph = compile_agent_graph(settings, checkpointer)
             _install_app_state(
@@ -131,7 +166,7 @@ async def lifespan(app: FastAPI):
             )
             start_scheduler(_scheduled_executor)
             _configure_monitoring(app, settings)
-            yield #配置 DATABASE_URL：会话保存到 PostgreSQL，重启后仍存在，也适合多进程部署。
+            yield  # 配置 DATABASE_URL：会话保存到 PostgreSQL，重启后仍存在，也适合多进程部署。
     else:
         checkpointer = memory_checkpointer()
         graph = compile_agent_graph(settings, checkpointer)
@@ -145,7 +180,7 @@ async def lifespan(app: FastAPI):
         )
         start_scheduler(_scheduled_executor)
         _configure_monitoring(app, settings)
-        yield  #没有配置：保存到当前进程内存，服务重启后消失。
+        yield  # 没有配置：保存到当前进程内存，服务重启后消失。
 
 
 def create_app() -> FastAPI:

@@ -5,8 +5,8 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from chaincloud_agent_service.memory.models import MemoryRecord
-from chaincloud_agent_service.memory.store import InMemoryMemoryStore
+from chaincloud_agent_service.memory.models import MemoryCandidate, MemoryRecord
+from chaincloud_agent_service.memory.store import MemoryStore
 
 DEFAULT_MAX_MESSAGES = 50
 DEFAULT_TRANSCRIPT_MAX_CHARS = 12000
@@ -24,7 +24,8 @@ SUMMARY_PROMPT_TEMPLATE = """请把下面这段对话整理成一段可复用的
 """
 
 MEMORY_SYSTEM_PROMPT_TEMPLATE = """以下是该用户或该任务此前沉淀的长期记忆摘要。
-请把它作为回答当前问题的背景参考，但不要生硬复述，也不要说“根据长期记忆”。
+请把它只作为历史上下文和分析口径参考，不要生硬复述，也不要说“根据长期记忆”。
+其中的余额、交易、行情、协议状态等可能已过期，回答当前事实时必须以本轮工具证据为准。
 
 {summary}
 """
@@ -75,8 +76,11 @@ def truncate_text(text: str, max_chars: int) -> str:
 class MemoryService:
     """Memory v1 的业务层。"""
 
-    def __init__(self, store: InMemoryMemoryStore) -> None:
+    def __init__(
+        self, store: MemoryStore, embedding_provider: Any | None = None
+    ) -> None:
         self.store = store
+        self.embedding_provider = embedding_provider
 
     def save_memory(
         self,
@@ -85,13 +89,101 @@ class MemoryService:
         summary: str,
         source_thread_id: str,
         metadata: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        memory_type: str | None = None,
     ) -> MemoryRecord:
+        owner = user_id or (metadata or {}).get("user_id")
+        embedding = self._embed(summary) if owner else None
         return self.store.save(
             memory_key=memory_key,
             summary=summary,
             source_thread_id=source_thread_id,
             metadata=metadata,
+            user_id=owner,
+            memory_type=memory_type,
+            embedding=embedding,
         )
+
+    def _embed(self, text: str) -> list[float] | None:
+        if self.embedding_provider is None:
+            return None
+        try:
+            return list(self.embedding_provider.embed_query(text))
+        except Exception:
+            return None
+
+    @staticmethod
+    def memory_recall_gate(message: str) -> tuple[bool, str]:
+        normalized = message.strip().lower()
+        historical = (
+            "上次",
+            "之前",
+            "继续",
+            "还是按之前",
+            "沿用",
+            "之前那个",
+            "我们之前",
+            "以前分析过",
+            "和上次比较",
+            "last time",
+            "previously",
+            "continue",
+        )
+        current_fact = (
+            "今天",
+            "当前",
+            "现在",
+            "tx_hash",
+            "交易",
+            "gas",
+            "图表",
+            "余额",
+            "行情",
+            "largest",
+            "latest",
+        )
+        if any(signal in normalized for signal in historical):
+            return True, "historical_reference"
+        if any(signal in normalized for signal in current_fact):
+            return False, "current_or_independent_request"
+        return False, "no_historical_signal"
+
+    def recall_memories(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        candidate_limit: int = 5,
+        selected_limit: int = 3,
+        min_similarity: float = 0.72,
+    ) -> list[MemoryCandidate]:
+        return self.recall_memories_with_stats(
+            user_id=user_id,
+            query=query,
+            candidate_limit=candidate_limit,
+            selected_limit=selected_limit,
+            min_similarity=min_similarity,
+        )[0]
+
+    def recall_memories_with_stats(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        candidate_limit: int = 5,
+        selected_limit: int = 3,
+        min_similarity: float = 0.72,
+    ) -> tuple[list[MemoryCandidate], int]:
+        embedding = self._embed(query)
+        if embedding is None:
+            return [], 0
+        candidates = self.store.search(
+            user_id=user_id, embedding=embedding, limit=candidate_limit
+        )
+        selected = [item for item in candidates if item.similarity >= min_similarity]
+        return sorted(selected, key=lambda item: item.final_score, reverse=True)[
+            :selected_limit
+        ], len(candidates)
 
     def get_memory(self, memory_key: str) -> MemoryRecord | None:
         return self.store.get(memory_key)

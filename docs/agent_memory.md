@@ -26,6 +26,15 @@ Memory v1 当前支持：
 - 删除 memory；
 - 根据 thread_id 的 checkpoint 历史生成摘要 memory；
 - 在 `/chat` 请求中通过 `memory_key` 注入已保存的 memory；
+- 无 `memory_key` 且消息明确引用跨线程历史时，按用户隔离执行语义召回；
+
+自动召回先经过确定性 `memory_recall_gate`。当前事实/工具查询走 cheap path，
+不会执行 embedding。成功召回的 key、摘要和无敏感内容的评分会保存到 thread
+checkpoint，相关追问优先复用。`memory_key` 始终优先，且保留原有 404 语义。
+
+长期记忆仅表示历史上下文，不是当前链上事实。余额、交易、行情和协议状态仍须以
+本轮工具证据为准。召回最多注入 3 条，并受独立 memory token budget 与全局
+ContextBuilder budget 双重约束；embedding、pgvector 或数据库异常会降级为不注入。
 - 提供 store、service、routes、chat injection 对应测试。
 
 当前暂不支持：
@@ -274,4 +283,3 @@ uv run pytest -q
 5. 引入向量检索或关键词检索；
 6. 在 graph 内部加入 memory retrieve / summarize 节点；
 7. 增加 memory 的来源 trace 和审计字段。
-
