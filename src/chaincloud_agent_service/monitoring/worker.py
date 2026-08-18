@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 import time
 from contextlib import nullcontext
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -28,11 +30,19 @@ class PostgresTransactionSource:
         self.database_url, self.table = database_url, table
         self.columns, self.batch_size = columns, batch_size
         self.process_existing = process_existing_on_first_run
-        for value in [table, *columns.values()]:
+        self.profile = "justlend" if table.lower() == "justlend" else "generic"
+        identifiers = (
+            [table, "tx_seq", "event_index", "tx_hash", "from_address", "to_address",
+             "amount", "amount_usd", "token_symbol", "occurred"]
+            if self.profile == "justlend" else [table, *columns.values()]
+        )
+        for value in identifiers:
             if not _IDENTIFIER.fullmatch(value):
                 raise ValueError(f"invalid transaction identifier: {value!r}")
 
     def scan(self, cursor: str | None) -> tuple[list[TransactionRecord], str | None]:
+        if self.profile == "justlend":
+            return self._scan_justlend(cursor)
         id_col = self.columns["id"]
         initialized_empty = cursor == _EMPTY_CURSOR
         if initialized_empty:
@@ -56,9 +66,80 @@ class PostgresTransactionSource:
         return txs, (txs[-1].transaction_id if txs else cursor)
 
     @staticmethod
+    def _justlend_cursor(tx_seq: Any, event_index: Any) -> str:
+        return json.dumps(
+            {"profile": "justlend", "tx_seq": int(tx_seq), "event_index": int(event_index)},
+            separators=(",", ":"), sort_keys=True,
+        )
+
+    @staticmethod
+    def _parse_justlend_cursor(cursor: str | None) -> tuple[int, int] | None:
+        if not cursor or cursor == _EMPTY_CURSOR:
+            return None
+        try:
+            payload = json.loads(cursor)
+            if isinstance(payload, dict) and payload.get("profile") == "justlend":
+                return int(payload["tx_seq"]), int(payload["event_index"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass
+        try:
+            return int(cursor), -1
+        except ValueError:
+            return None
+
+    def _scan_justlend(self, cursor: str | None) -> tuple[list[TransactionRecord], str | None]:
+        initialized_empty = cursor == _EMPTY_CURSOR
+        position = self._parse_justlend_cursor(cursor)
+        table = sql.Identifier(self.table)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as conn:
+            if position is None and not initialized_empty and not self.process_existing:
+                row = conn.execute(
+                    sql.SQL("""SELECT tx_seq,event_index FROM {}
+                        WHERE tx_seq IS NOT NULL AND event_index IS NOT NULL
+                        ORDER BY tx_seq DESC,event_index DESC LIMIT 1""").format(table)
+                ).fetchone()
+                if not row:
+                    return [], _EMPTY_CURSOR
+                return [], self._justlend_cursor(row["tx_seq"], row["event_index"])
+
+            where = sql.SQL("WHERE tx_seq IS NOT NULL AND event_index IS NOT NULL")
+            params: tuple[Any, ...] = (self.batch_size,)
+            if position is not None:
+                where = sql.SQL("WHERE (tx_seq,event_index) > (%s,%s)")
+                params = (*position, self.batch_size)
+            query = sql.SQL("""SELECT tx_seq,event_index,tx_hash AS hash,
+                from_address,to_address,amount,amount_usd,token_symbol AS token,
+                occurred AS occurred_at FROM {} {} ORDER BY tx_seq ASC,event_index ASC
+                LIMIT %s""").format(table, where)
+            rows = conn.execute(query, params).fetchall()
+
+        txs = [self._justlend_transaction(row) for row in rows]
+        next_cursor = (
+            self._justlend_cursor(rows[-1]["tx_seq"], rows[-1]["event_index"])
+            if rows else (cursor or _EMPTY_CURSOR)
+        )
+        return txs, next_cursor
+
+    @staticmethod
+    def _justlend_transaction(row: dict[str, Any]) -> TransactionRecord:
+        normalized = dict(row)
+        normalized["id"] = f"{row['tx_seq']}:{row['event_index']}"
+        normalized["chain"] = "tron"
+        return PostgresTransactionSource._transaction(normalized)
+
+    @staticmethod
     def _transaction(row: dict[str, Any]) -> TransactionRecord:
         def dec(value: Any) -> Decimal | None:
             return Decimal(str(value)) if value is not None else None
+        occurred_at = row.get("occurred_at")
+        if isinstance(occurred_at, str):
+            try:
+                normalized_time = re.sub(
+                    r"\s+([+-]\d{2}:?\d{2})$", r"\1", occurred_at.strip()
+                )
+                occurred_at = datetime.fromisoformat(normalized_time)
+            except ValueError:
+                occurred_at = None
         return TransactionRecord(
             transaction_id=str(row["id"]), transaction_hash=str(row["hash"]),
             from_address=str(row["from_address"]).lower() if row.get("from_address") else None,
@@ -66,7 +147,7 @@ class PostgresTransactionSource:
             amount=dec(row.get("amount")), amount_usd=dec(row.get("amount_usd")),
             chain=str(row["chain"]).lower() if row.get("chain") else None,
             token=str(row["token"]).lower() if row.get("token") else None,
-            occurred_at=row.get("occurred_at"), raw=dict(row),
+            occurred_at=occurred_at, raw=dict(row),
         )
 
 
@@ -132,6 +213,8 @@ class MonitorWorker:
             destination = self.destination_for_user(event.user_id, event.channel)
             result = self.notifications.send(event.channel, destination, event.payload)
             if result.success:
-                self.store.mark_sent(event.event_id); metrics["notification_success"] += 1
+                self.store.mark_sent(event.event_id)
+                metrics["notification_success"] += 1
             else:
-                self.store.mark_failed(event.event_id, result.error or "unknown error"); metrics["notification_failure"] += 1
+                self.store.mark_failed(event.event_id, result.error or "unknown error")
+                metrics["notification_failure"] += 1

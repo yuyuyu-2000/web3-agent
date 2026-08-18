@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from chaincloud_agent_service.monitoring.models import MonitorRule, NotificationEvent, TransactionRecord
-from chaincloud_agent_service.monitoring.worker import MonitorWorker, matches
+from chaincloud_agent_service.monitoring.models import MonitorRule, TransactionRecord
+from chaincloud_agent_service.monitoring.worker import MonitorWorker, PostgresTransactionSource, matches
 from chaincloud_agent_service.notification.service import NotificationResult
 
 
@@ -58,3 +58,51 @@ def test_worker_scans_once_and_batches_all_rules():
     assert metrics["enabled_rules"] == 2
     assert metrics["matched_rules"] == 1
 
+
+def test_justlend_profile_uses_composite_cursor_and_normalizes_schema():
+    source = PostgresTransactionSource(
+        "postgresql://unused", table="justlend", columns={}, batch_size=1000
+    )
+    cursor = source._justlend_cursor(89235009831089, 2)
+    assert source.profile == "justlend"
+    assert source._parse_justlend_cursor(cursor) == (89235009831089, 2)
+    assert source._parse_justlend_cursor("89235009831089") == (89235009831089, -1)
+
+    tx = source._justlend_transaction({
+        "tx_seq": 89235009831089,
+        "event_index": 2,
+        "hash": "ABCDEF",
+        "from_address": "TFrom",
+        "to_address": "TTo",
+        "amount": 81852.695,
+        "amount_usd": 81852.695,
+        "token": "USDT",
+        "occurred_at": "2026-08-06 07:58:15.000 +0800",
+    })
+    assert tx.transaction_id == "89235009831089:2"
+    assert tx.transaction_hash == "ABCDEF"
+    assert tx.chain == "tron"
+    assert tx.token == "usdt"
+    assert tx.amount_usd == Decimal("81852.695")
+    assert tx.occurred_at is not None
+    assert tx.occurred_at.utcoffset() is not None
+
+
+def test_justlend_composite_event_id_keeps_same_transaction_events_distinct():
+    source = PostgresTransactionSource(
+        "postgresql://unused", table="justlend", columns={}, batch_size=1000
+    )
+    base = {
+        "tx_seq": 100,
+        "hash": "HASH",
+        "from_address": None,
+        "to_address": None,
+        "amount": 1,
+        "amount_usd": 1,
+        "token": "USDT",
+        "occurred_at": None,
+    }
+    first = source._justlend_transaction({**base, "event_index": 1})
+    second = source._justlend_transaction({**base, "event_index": 2})
+    assert first.transaction_id == "100:1"
+    assert second.transaction_id == "100:2"
