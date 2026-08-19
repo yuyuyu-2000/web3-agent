@@ -26,7 +26,10 @@ from chaincloud_agent_service.tools.dashboard import make_dashboard_tool
 from chaincloud_agent_service.tools.eth_jsonrpc import make_ethereum_jsonrpc_tool
 from chaincloud_agent_service.tools.kb_search import make_kb_search_tool
 from chaincloud_agent_service.tools.scheduler_tools import make_scheduler_tool
-from chaincloud_agent_service.tools.tron_rpc import make_tron_node_tool
+from chaincloud_agent_service.tools.tron_rpc import (
+    make_tron_node_tool,
+    make_tron_transaction_lookup_tool,
+)
 from chaincloud_agent_service.tools.web_search import make_web_search_tool
 from chaincloud_agent_service.tools.monitor_tools import make_monitor_tools
 
@@ -52,6 +55,7 @@ def get_tools(settings: Settings) -> list[Any]:
     tools.extend(make_chart_tools(settings.readonly_database_url))
     tools.append(make_dashboard_tool())
     tools.append(make_scheduler_tool())
+    tools.append(make_tron_transaction_lookup_tool())
     if settings.monitor_enabled and settings.monitor_database_url:
         tools.extend(make_monitor_tools())
     clickhouse_datasources = load_clickhouse_datasources(settings)

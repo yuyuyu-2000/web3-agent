@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -11,6 +12,8 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 _MAX_RESPONSE_CHARS = 400_000
+_PUBLIC_TRON_RPC = "https://api.trongrid.io"
+_TXID_RE = re.compile(r"^(?:0x)?([0-9a-fA-F]{64})$")
 
 
 def _safe_path(path: str) -> str:
@@ -72,6 +75,84 @@ class TronNodeInput(BaseModel):
             "POST 请求体：可省略（等价 {}）。"
             "可直接传 JSON 对象 {}，或 JSON 字符串如 '{}'；查最新块时传空对象即可。"
         ),
+    )
+
+
+class TronTransactionInput(BaseModel):
+    txid: str = Field(
+        description="TRON 交易哈希（64 个十六进制字符，可带 0x 前缀）"
+    )
+
+
+def _normalize_txid(txid: str) -> str:
+    match = _TXID_RE.fullmatch(txid.strip())
+    if not match:
+        raise ValueError("txid 必须是 64 个十六进制字符（可带 0x 前缀）")
+    return match.group(1).lower()
+
+
+def make_tron_transaction_lookup_tool(
+    rpc_url: str = _PUBLIC_TRON_RPC,
+) -> StructuredTool:
+    """Create a read-only transaction lookup backed by TRON HTTP APIs."""
+
+    def _invoke(txid: str) -> str:
+        try:
+            normalized_txid = _normalize_txid(txid)
+        except ValueError as exc:
+            return json.dumps(
+                {"txid": txid, "error": str(exc)}, ensure_ascii=False
+            )
+
+        body = {"value": normalized_txid}
+        endpoints = {
+            "transaction": "/wallet/gettransactionbyid",
+            "transaction_info": "/wallet/gettransactioninfobyid",
+        }
+        combined: dict[str, Any] = {
+            "provider": "tron_public_node",
+            "txid": normalized_txid,
+            "transaction": None,
+            "transaction_info": None,
+            "errors": {},
+        }
+
+        for result_key, path in endpoints.items():
+            try:
+                raw = _post(rpc_url, path, body)
+                combined[result_key] = json.loads(raw)
+            except json.JSONDecodeError:
+                combined["errors"][result_key] = "节点返回的内容不是合法 JSON"
+            except HTTPError as exc:
+                try:
+                    detail = exc.read().decode("utf-8", errors="replace")
+                except Exception:
+                    detail = ""
+                combined["errors"][result_key] = {
+                    "error": f"HTTP {exc.code}: {exc.reason}",
+                    "detail": detail[:2000],
+                }
+            except URLError as exc:
+                combined["errors"][result_key] = f"请求失败: {exc.reason!s}"
+            except TimeoutError:
+                combined["errors"][result_key] = "请求超时: 60s"
+            except Exception as exc:
+                combined["errors"][result_key] = str(exc)
+
+        if not combined["errors"]:
+            del combined["errors"]
+        return json.dumps(combined, ensure_ascii=False, default=str)
+
+    return StructuredTool.from_function(
+        name="get_tron_transaction",
+        description=(
+            "通过 TRON 公共节点按交易哈希查询链上数据。工具只执行两个固定的只读接口："
+            "/wallet/gettransactionbyid 获取交易本体，"
+            "/wallet/gettransactioninfobyid 获取执行回执、费用、日志和内部交易；"
+            "随后合并结果供分析。该工具不能签名、广播交易或执行任何写链操作。"
+        ),
+        func=_invoke,
+        args_schema=TronTransactionInput,
     )
 
 

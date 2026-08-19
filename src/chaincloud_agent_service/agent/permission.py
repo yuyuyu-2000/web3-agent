@@ -17,7 +17,7 @@ PermissionAction = Literal["ALLOW", "NEED_CONFIRM", "DENY"]
 _READ_ONLY_TOOLS = {
     "postgres_select", "postgres_list_tables", "postgres_table_schema",
     "search_knowledge", "web_search", "clickhouse_list_datasources",
-    "clickhouse_select", "tron_node_request", "ethereum_jsonrpc",
+    "clickhouse_select", "tron_node_request", "get_tron_transaction", "ethereum_jsonrpc",
     "contract_decode_tx_input",
     "list_monitor_rules",
 }

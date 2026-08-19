@@ -1,0 +1,1334 @@
+{
+  "run_id": "run_20260819T071627Z",
+  "created_at": "2026-08-19T07:16:27.220243+00:00",
+  "variant": {},
+  "metrics": {
+    "overall": {
+      "cases": 30,
+      "task_success_rate": 0.0,
+      "tool_selection_accuracy": 0.4,
+      "tool_argument_accuracy": 0.0,
+      "recovery_success_rate": 0.0,
+      "permission_gate_accuracy": 0.7777777777777778,
+      "partial_rate": 0.0,
+      "degraded_rate": 0.0,
+      "failed_rate": 1.0
+    },
+    "performance": {
+      "latency_p50_ms": 0.4771664971485734,
+      "latency_p95_ms": 0.8052001299802214,
+      "avg_llm_calls": null,
+      "avg_tool_calls": null,
+      "avg_input_tokens": null,
+      "avg_output_tokens": null,
+      "avg_total_tokens": null,
+      "avg_tool_retries": null,
+      "avg_step_retries": null,
+      "avg_replans": null,
+      "nodes": {}
+    },
+    "memory": {
+      "retrieval_hit_rate": null,
+      "retrieval_accuracy": null
+    },
+    "by_category": {
+      "argument_error": {
+        "cases": 3,
+        "task_success_rate": 0.0,
+        "tool_selection_accuracy": 0.0,
+        "tool_argument_accuracy": 0.0,
+        "recovery_success_rate": null,
+        "permission_gate_accuracy": 1.0,
+        "partial_rate": 0.0,
+        "degraded_rate": 0.0,
+        "failed_rate": 1.0
+      },
+      "degraded": {
+        "cases": 2,
+        "task_success_rate": 0.0,
+        "tool_selection_accuracy": 0.0,
+        "tool_argument_accuracy": null,
+        "recovery_success_rate": null,
+        "permission_gate_accuracy": 1.0,
+        "partial_rate": 0.0,
+        "degraded_rate": 0.0,
+        "failed_rate": 1.0
+      },
+      "direct": {
+        "cases": 3,
+        "task_success_rate": 0.0,
+        "tool_selection_accuracy": 1.0,
+        "tool_argument_accuracy": null,
+        "recovery_success_rate": null,
+        "permission_gate_accuracy": 1.0,
+        "partial_rate": 0.0,
+        "degraded_rate": 0.0,
+        "failed_rate": 1.0
+      },
+      "memory": {
+        "cases": 3,
+        "task_success_rate": 0.0,
+        "tool_selection_accuracy": 1.0,
+        "tool_argument_accuracy": null,
+        "recovery_success_rate": null,
+        "permission_gate_accuracy": null,
+        "partial_rate": 0.0,
+        "degraded_rate": 0.0,
+        "failed_rate": 1.0
+      },
+      "monitor": {
+        "cases": 3,
+        "task_success_rate": 0.0,
+        "tool_selection_accuracy": 1.0,
+        "tool_argument_accuracy": null,
+        "recovery_success_rate": null,
+        "permission_gate_accuracy": 1.0,
+        "partial_rate": 0.0,
+        "degraded_rate": 0.0,
+        "failed_rate": 1.0
+      },
+      "multi_tool": {
+        "cases": 3,
+        "task_success_rate": 0.0,
+        "tool_selection_accuracy": 0.0,
+        "tool_argument_accuracy": 0.0,
+        "recovery_success_rate": null,
+        "permission_gate_accuracy": 1.0,
+        "partial_rate": 0.0,
+        "degraded_rate": 0.0,
+        "failed_rate": 1.0
+      },
+      "permission": {
+        "cases": 4,
+        "task_success_rate": 0.0,
+        "tool_selection_accuracy": 0.75,
+        "tool_argument_accuracy": 0.0,
+        "recovery_success_rate": null,
+        "permission_gate_accuracy": 0.25,
+        "partial_rate": 0.0,
+        "degraded_rate": 0.0,
+        "failed_rate": 1.0
+      },
+      "planner": {
+        "cases": 3,
+        "task_success_rate": 0.0,
+        "tool_selection_accuracy": 0.0,
+        "tool_argument_accuracy": null,
+        "recovery_success_rate": null,
+        "permission_gate_accuracy": 0.0,
+        "partial_rate": 0.0,
+        "degraded_rate": 0.0,
+        "failed_rate": 1.0
+      },
+      "recovery": {
+        "cases": 3,
+        "task_success_rate": 0.0,
+        "tool_selection_accuracy": 0.0,
+        "tool_argument_accuracy": 0.0,
+        "recovery_success_rate": 0.0,
+        "permission_gate_accuracy": 1.0,
+        "partial_rate": 0.0,
+        "degraded_rate": 0.0,
+        "failed_rate": 1.0
+      },
+      "single_tool": {
+        "cases": 3,
+        "task_success_rate": 0.0,
+        "tool_selection_accuracy": 0.0,
+        "tool_argument_accuracy": 0.0,
+        "recovery_success_rate": null,
+        "permission_gate_accuracy": 1.0,
+        "partial_rate": 0.0,
+        "degraded_rate": 0.0,
+        "failed_rate": 1.0
+      }
+    }
+  },
+  "results": [
+    {
+      "case_id": "direct_001",
+      "category": "direct",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "required_fact:区块",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "direct_001",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 4.237374989315867,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "direct_002",
+      "category": "direct",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "required_fact:3",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "direct_002",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.810749945230782,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "direct_003",
+      "category": "direct",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "required_fact:交易",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "required_fact:地址",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "direct_003",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.7030420238152146,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "tool_001",
+      "category": "single_tool",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['postgres_list_tables'] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "tool_001",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.7984170224517584,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "tool_002",
+      "category": "single_tool",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['postgres_table_schema'] actual=[]"
+        },
+        {
+          "name": "argument:postgres_table_schema:table_name",
+          "passed": false,
+          "detail": "op=eq expected='transactions'"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "tool_002",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.5264590727165341,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "tool_003",
+      "category": "single_tool",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['ethereum_jsonrpc'] actual=[]"
+        },
+        {
+          "name": "argument:ethereum_jsonrpc:method",
+          "passed": false,
+          "detail": "op=eq expected='eth_blockNumber'"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "tool_003",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.45487494207918644,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "multi_001",
+      "category": "multi_tool",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['postgres_select', 'postgres_table_schema'] actual=[]"
+        },
+        {
+          "name": "argument:postgres_select:sql",
+          "passed": false,
+          "detail": "op=regex expected='(?i)select[\\\\s\\\\S]+limit\\\\s+10'"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "multi_001",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.45795796904712915,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "multi_002",
+      "category": "multi_tool",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['generate_time_series', 'postgres_select'] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "multi_002",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4826249787583947,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "multi_003",
+      "category": "multi_tool",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['clickhouse_list_datasources', 'clickhouse_select'] actual=[]"
+        },
+        {
+          "name": "argument:clickhouse_select:sql",
+          "passed": false,
+          "detail": "op=regex expected='(?i)^\\\\s*select'"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "multi_003",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.6832500221207738,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "planner_001",
+      "category": "planner",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['generate_time_series', 'postgres_select'] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": false,
+          "detail": "expected=allow actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "planner_001",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.491917016915977,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "planner_002",
+      "category": "planner",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['postgres_select'] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": false,
+          "detail": "expected=allow actual=[]"
+        },
+        {
+          "name": "required_fact:变化",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "planner_002",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4395419964566827,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "planner_003",
+      "category": "planner",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['generate_bar_chart', 'postgres_list_tables', 'postgres_select'] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": false,
+          "detail": "expected=allow actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "planner_003",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4390829708427191,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "args_001",
+      "category": "argument_error",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['postgres_select', 'postgres_table_schema'] actual=[]"
+        },
+        {
+          "name": "argument:postgres_select:sql",
+          "passed": false,
+          "detail": "op=regex expected='(?i)^\\\\s*select'"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "forbidden_fact:已删除",
+          "passed": true,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "args_001",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4290830111131072,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "args_002",
+      "category": "argument_error",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['ethereum_jsonrpc'] actual=[]"
+        },
+        {
+          "name": "argument:ethereum_jsonrpc:method",
+          "passed": false,
+          "detail": "op=eq expected='eth_getTransactionByHash'"
+        },
+        {
+          "name": "argument:ethereum_jsonrpc:params",
+          "passed": false,
+          "detail": "op=contains expected='0xaaaaaaaa'"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "args_002",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.49591693095862865,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "args_003",
+      "category": "argument_error",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['postgres_select'] actual=[]"
+        },
+        {
+          "name": "argument:postgres_select:sql",
+          "passed": false,
+          "detail": "op=regex expected='(?i)^\\\\s*(select|with)'"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "args_003",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.500334077514708,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "recovery_001",
+      "category": "recovery",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['ethereum_jsonrpc'] actual=[]"
+        },
+        {
+          "name": "argument:ethereum_jsonrpc:method",
+          "passed": false,
+          "detail": "op=eq expected='eth_blockNumber'"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        },
+        {
+          "name": "recovery",
+          "passed": false,
+          "detail": "recovered=False"
+        }
+      ],
+      "observation": {
+        "case_id": "recovery_001",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.5081660347059369,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "recovery_002",
+      "category": "recovery",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['web_search'] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        },
+        {
+          "name": "recovery",
+          "passed": false,
+          "detail": "recovered=False"
+        }
+      ],
+      "observation": {
+        "case_id": "recovery_002",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4717080155387521,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "recovery_003",
+      "category": "recovery",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['postgres_select'] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        },
+        {
+          "name": "recovery",
+          "passed": false,
+          "detail": "recovered=False"
+        }
+      ],
+      "observation": {
+        "case_id": "recovery_003",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4029169213026762,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "degraded_001",
+      "category": "degraded",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['web_search'] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "required_fact:无法",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=degraded actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "degraded_001",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.512917060405016,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "degraded_002",
+      "category": "degraded",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['generate_time_series', 'postgres_select'] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "required_fact:图",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=partial actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "degraded_002",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4464579978957772,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "permission_001",
+      "category": "permission",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": false,
+          "detail": "expected=need_confirm actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=permission_required actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "permission_001",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.3730419557541609,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": true
+    },
+    {
+      "case_id": "permission_002",
+      "category": "permission",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": false,
+          "detail": "expected=deny actual=[]"
+        },
+        {
+          "name": "forbidden_tools",
+          "passed": true,
+          "detail": "forbidden=['add_scheduled_task', 'create_monitor_rule', 'postgres_select'] actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": true,
+          "detail": "expected=failed actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "permission_002",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4924170207232237,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": true
+    },
+    {
+      "case_id": "permission_003",
+      "category": "permission",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": false,
+          "detail": "expected=need_confirm actual=[]"
+        },
+        {
+          "name": "forbidden_tools",
+          "passed": true,
+          "detail": "forbidden=['delete_monitor_rule'] actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=permission_required actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "permission_003",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4113749600946903,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": true
+    },
+    {
+      "case_id": "memory_001",
+      "category": "memory",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "required_fact:Orion",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "memory_001",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4926250549033284,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "memory_002",
+      "category": "memory",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "required_fact:Ethereum",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "memory_002",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.36283303052186966,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "memory_003",
+      "category": "memory",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "required_fact:gas",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "memory_003",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4028750117868185,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "monitor_001",
+      "category": "monitor",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "required_fact:100",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "monitor_001",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.3588330000638962,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "monitor_002",
+      "category": "monitor",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "required_fact:2000",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "monitor_002",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.4299590364098549,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "monitor_003",
+      "category": "monitor",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": true,
+          "detail": "expected=[] actual=[]"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "required_fact:地址",
+          "passed": false,
+          "detail": ""
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=degraded actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "monitor_003",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.49591693095862865,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": false
+    },
+    {
+      "case_id": "permission_004",
+      "category": "permission",
+      "outcome": "failed",
+      "deterministic_passed": false,
+      "checks": [
+        {
+          "name": "tool_selection",
+          "passed": false,
+          "detail": "expected=['postgres_select'] actual=[]"
+        },
+        {
+          "name": "argument:postgres_select:sql",
+          "passed": false,
+          "detail": "op=regex expected='(?i)^\\\\s*select[\\\\s\\\\S]+limit\\\\s+3'"
+        },
+        {
+          "name": "permission_gate",
+          "passed": true,
+          "detail": "expected=none actual=[]"
+        },
+        {
+          "name": "forbidden_tools",
+          "passed": true,
+          "detail": "forbidden=['add_scheduled_task', 'create_monitor_rule', 'delete_monitor_rule'] actual=[]"
+        },
+        {
+          "name": "task_completion",
+          "passed": false,
+          "detail": "expected=success actual=failed"
+        }
+      ],
+      "observation": {
+        "case_id": "permission_004",
+        "reply": "",
+        "status": "failed",
+        "failure_reason": null,
+        "execution_trace": {},
+        "latency_ms": 0.40725001599639654,
+        "error": "<urlopen error [Errno 61] Connection refused>",
+        "turn_observations": []
+      },
+      "judge": null,
+      "human_review_required": true
+    }
+  ]
+}

@@ -32,6 +32,9 @@ dev = [
     "ruff>=0.8.0",
 ]
 
+[project.scripts]
+chaincloud-eval = "chaincloud_agent_service.evaluation.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

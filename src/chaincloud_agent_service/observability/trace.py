@@ -224,6 +224,14 @@ def build_request_summary(state: dict[str, Any]) -> dict[str, Any]:
     rolling_summary_calls = sum(
         1 for event in compact_events if event.get("status") in {"success", "failed"}
     )
+    input_tokens = output_tokens = 0
+    token_data_available = False
+    for message in state.get("messages", []):
+        usage = getattr(message, "usage_metadata", None) or {}
+        if usage:
+            token_data_available = True
+            input_tokens += int(usage.get("input_tokens", 0) or 0)
+            output_tokens += int(usage.get("output_tokens", 0) or 0)
     return safe_trace_event(
         {
             "trace_id": state.get("trace_id"),
@@ -267,6 +275,10 @@ def build_request_summary(state: dict[str, Any]) -> dict[str, Any]:
                 1 for event in compact_events if event.get("status") == "failed"
             ),
             "rolling_summary_calls": rolling_summary_calls,
+            "replans": int(state.get("replanning_count", 0) or 0),
+            "input_tokens": input_tokens if token_data_available else None,
+            "output_tokens": output_tokens if token_data_available else None,
+            "total_tokens": (input_tokens + output_tokens) if token_data_available else None,
             "final_status": final_status,
         }
     )
