@@ -12,6 +12,7 @@ from chaincloud_agent_service.evaluation.models import (
     FaultSpec,
 )
 from chaincloud_agent_service.evaluation.runner import load_cases
+from chaincloud_agent_service.evaluation.runner import EvaluationRunner
 
 
 def _case(**updates):  # type: ignore[no-untyped-def]
@@ -37,13 +38,12 @@ def test_dataset_has_thirty_valid_unique_cases() -> None:
     assert len({case.case_id for case in cases}) == 30
     assert {
         "direct",
-        "single_tool",
+        "database",
+        "tron",
         "multi_tool",
-        "planner",
-        "argument_error",
+        "chart",
+        "scheduler",
         "recovery",
-        "degraded",
-        "permission",
         "memory",
         "monitor",
     }.issubset({case.category for case in cases})
@@ -121,3 +121,48 @@ def test_metrics_use_null_for_unavailable_tokens_and_compute_percentiles() -> No
     assert metrics["overall"]["task_success_rate"] == 1
     assert metrics["performance"]["latency_p95_ms"] == 100
     assert metrics["performance"]["avg_total_tokens"] is None
+
+
+def test_metrics_ignore_legacy_redacted_token_values() -> None:
+    result = evaluate_case(
+        _case(),
+        EvalObservation(
+            case_id="c1",
+            reply="42",
+            status="completed",
+            execution_trace={
+                "tool_result_records": [
+                    {"tool_name": "lookup", "tool_args": {"limit": 5}}
+                ],
+                "request_summary": {
+                    "final_status": "success",
+                    "input_tokens": "[REDACTED]",
+                    "output_tokens": "[REDACTED]",
+                    "total_tokens": "[REDACTED]",
+                },
+            },
+        ),
+    )
+    assert aggregate([result])["performance"]["avg_total_tokens"] is None
+
+
+def test_runner_skips_cases_unsupported_by_adapter(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    class Adapter:
+        unsupported_capabilities = {"fault_injection"}
+
+        def run(self, case, *, variant=None):  # type: ignore[no-untyped-def]
+            return EvalObservation(case_id=case.case_id, status="completed")
+
+    normal = _case(
+        expected_tools=None,
+        expected_arguments=[],
+        ground_truth={"expected_result": "success"},
+    )
+    fault = normal.model_copy(
+        update={"case_id": "fault", "required_capabilities": ["fault_injection"]}
+    )
+    payload = EvaluationRunner(Adapter()).run(
+        [normal, fault], output_dir=tmp_path, run_id="skip"
+    )
+    assert payload["evaluated_cases"] == 1
+    assert payload["skipped_cases"][0]["case_id"] == "fault"

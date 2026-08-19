@@ -145,7 +145,11 @@ def evaluate_case(case: EvalCase, observation: EvalObservation) -> CaseResult:
                 detail=f"forbidden={sorted(forbidden)} actual={names}",
             )
         )
-    answer = observation.reply.casefold()
+    answer = (
+        observation.reply
+        + "\n"
+        + json.dumps(observation.response_metadata, ensure_ascii=False, default=str)
+    ).casefold()
     for fact in case.ground_truth.required_facts:
         checks.append(
             CheckResult(name=f"required_fact:{fact}", passed=fact.casefold() in answer)

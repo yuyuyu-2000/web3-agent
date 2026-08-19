@@ -4,7 +4,11 @@
 
 ## Dataset
 
-`eval/test_cases.jsonl` 每行一个 case。必填字段是 `case_id`、`category`、`user_query`、`ground_truth`、`tags`。`ground_truth.expected_result` 表示预期终态，`required_facts`/`forbidden_facts` 是大小写不敏感的事实锚点；`expected_tools` 是必须调用工具的集合（空数组表示不应调用工具）；`expected_arguments` 使用 `tool/path/op/value` 约束，op 支持 `eq/contains/regex/in/gte/lte/exists`。安全 case 用 `human_review=true`。开放式语义 case 可设置 `judge=true`。
+`eval/test_cases.jsonl` 每行一个 case。必填字段是 `case_id`、`category`、`user_query`、`ground_truth`、`tags`。`ground_truth.expected_result` 表示预期终态，`required_facts`/`forbidden_facts` 是大小写不敏感的事实锚点；`expected_tools` 是必须调用工具的集合（空数组表示不应调用工具）；`expected_arguments` 使用 `tool/path/op/value` 约束，op 支持 `eq/contains/regex/in/gte/lte/exists`。`required_capabilities` 声明 case 对运行环境的依赖，便于运行前筛选和审计。安全 case 用 `human_review=true`。开放式语义 case 可设置 `judge=true`。
+
+当前主数据集针对本项目真实范围：`public.justlend`、`public.croas_chain`、TRON 交易/节点查询、图表、Scheduler、Monitoring 和跨轮 Memory。未启用的 Ethereum、ClickHouse、Web Search、Knowledge Base 不进入主成功率。
+
+普通 HTTP adapter 无法替换服务端工具，因此会自动跳过声明了 `fault_injection` 的 case，并把原因写入报告；这些 case 只在测试构图或可控 replay 中进入指标分母，避免把未发生的模拟故障当作恢复失败。
 
 ## Run
 
@@ -13,7 +17,7 @@
 ```bash
 python -m chaincloud_agent_service.evaluation.cli \
   --dataset eval/test_cases.jsonl \
-  --endpoint http://127.0.0.1:8000/chat \
+  --endpoint http://127.0.0.1:8001/chat \
   --output-dir eval_results
 ```
 
@@ -36,7 +40,7 @@ Deterministic evaluator 始终先运行。只有 `judge=true` 的开放式答案
 运行 ablation：
 
 ```bash
-python -m chaincloud_agent_service.evaluation.cli --dataset eval/test_cases.jsonl --endpoint http://127.0.0.1:8000/chat --ablation
+python -m chaincloud_agent_service.evaluation.cli --dataset eval/test_cases.jsonl --endpoint http://127.0.0.1:8001/chat --ablation
 ```
 
 当前 HTTP adapter 可真实切换 Planner（`planned/auto` 与 `direct`）。Recovery、Memory Recall、Context Compression 的 flag 已预留在 adapter contract；在应用提供 request-scoped 开关前，它们应标记为“not supported”，不得据此宣称实验生效。推荐后续在测试构图 factory 中映射：Recovery -> `max_tool_retries=0`，Memory -> `memory_recall_enabled=false`，Compression -> 禁用 rolling summary。无需实现新的业务能力。

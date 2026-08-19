@@ -28,8 +28,25 @@ class EvaluationRunner:
         run_id: str | None = None,
         variant: dict[str, bool] | None = None,
     ) -> dict[str, Any]:
+        unsupported = set(getattr(self.adapter, "unsupported_capabilities", set()))
+        skipped_cases = [
+            {
+                "case_id": case.case_id,
+                "reason": "adapter does not support: "
+                + ", ".join(
+                    sorted(unsupported.intersection(case.required_capabilities))
+                ),
+            }
+            for case in cases
+            if unsupported.intersection(case.required_capabilities)
+        ]
+        runnable_cases = [
+            case
+            for case in cases
+            if not unsupported.intersection(case.required_capabilities)
+        ]
         case_results = []
-        for case in cases:
+        for case in runnable_cases:
             result = evaluate_case(case, self.adapter.run(case, variant=variant))
             if case.ground_truth.judge and self.judge is not None:
                 result.judge = self.judge.judge(case, result.observation)
@@ -42,6 +59,9 @@ class EvaluationRunner:
             "run_id": run_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "variant": variant or {},
+            "dataset_cases": len(cases),
+            "evaluated_cases": len(runnable_cases),
+            "skipped_cases": skipped_cases,
             "metrics": aggregate(case_results),
             "results": [r.model_dump() for r in case_results],
         }

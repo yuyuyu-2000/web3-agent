@@ -64,5 +64,9 @@ def write_report(
         lines.append(
             f"| {result['case_id']} | {result['category']} | {result['outcome']} | {'yes' if result['human_review_required'] else 'no'} |"
         )
+    if payload.get("skipped_cases"):
+        lines += ["", "## Skipped cases", "", "| Case | Reason |", "|---|---|"]
+        for item in payload["skipped_cases"]:
+            lines.append(f"| {item['case_id']} | {item['reason']} |")
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return json_path, md_path

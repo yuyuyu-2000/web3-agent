@@ -146,7 +146,12 @@ def test_execution_trace_summary_uses_unified_event_buckets():
         ],
         "tool_events": [
             {"tool_call_id": "call-1", "attempt": 1, "status": "error"},
-            {"tool_call_id": "call-1", "attempt": 2, "status": "success", "recovered": True},
+            {
+                "tool_call_id": "call-1",
+                "attempt": 2,
+                "status": "success",
+                "recovered": True,
+            },
         ],
         "decision_events": [
             {"decision_type": "permission_gate", "action": "allow"},
@@ -154,7 +159,9 @@ def test_execution_trace_summary_uses_unified_event_buckets():
         ],
         "error_events": [{"source": "tool", "error_type": "timeout"}],
         "context_events": [{"scene": "router", "trimmed": [{"category": "summary"}]}],
-        "tool_result_records": [{"result_id": "raw-1", "tool_args": {"api_key": "secret"}}],
+        "tool_result_records": [
+            {"result_id": "raw-1", "tool_args": {"api_key": "secret"}}
+        ],
         "compact_events": [{"mode": "proactive", "status": "success"}],
         "summary_version": 1,
         "summarized_until": 5,
@@ -177,3 +184,19 @@ def test_execution_trace_summary_uses_unified_event_buckets():
     assert summary["rolling_summary_calls"] == 1
     assert trace["rolling_summary"]["summary_version"] == 1
     assert summary["final_status"] == "degraded"
+
+
+def test_token_usage_metrics_are_not_redacted_but_credentials_are() -> None:
+    class Message:
+        usage_metadata = {"input_tokens": 12, "output_tokens": 3}
+
+    state = {
+        **new_execution_context("thread-token-usage"),
+        "messages": [Message()],
+        "status": "completed",
+    }
+    trace = execution_trace_from_state(state)
+
+    assert trace["request_summary"]["input_tokens"] == 12
+    assert trace["request_summary"]["output_tokens"] == 3
+    assert trace["request_summary"]["total_tokens"] == 15

@@ -47,7 +47,16 @@ def aggregate(results: list[CaseResult]) -> dict[str, Any]:
     ]
 
     def avg(field: str) -> float | None:
-        values = [float(s[field]) for s in summaries if s.get(field) is not None]
+        values: list[float] = []
+        for summary in summaries:
+            value = summary.get(field)
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                # A malformed or legacy/redacted trace must not abort the run.
+                continue
         return mean(values) if values else None
 
     def overall_for(group: list[CaseResult]) -> dict[str, Any]:

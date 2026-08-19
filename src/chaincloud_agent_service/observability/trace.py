@@ -48,9 +48,26 @@ _SENSITIVE_KEYWORDS = (
     "privatekey",
 )
 
+_NON_SENSITIVE_USAGE_KEYS = {
+    "tokens",
+    "category_tokens",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "max_input_tokens",
+    "remaining_input_tokens",
+    "reserved_output_tokens",
+    "rolling_summary_max_input_tokens",
+    "memory_recall_context_tokens",
+}
+
 
 def _is_sensitive_key(key: Any) -> bool:
     key_text = str(key).lower()
+    if key_text in _NON_SENSITIVE_USAGE_KEYS:
+        return False
     return any(keyword in key_text for keyword in _SENSITIVE_KEYWORDS)
 
 
@@ -278,7 +295,9 @@ def build_request_summary(state: dict[str, Any]) -> dict[str, Any]:
             "replans": int(state.get("replanning_count", 0) or 0),
             "input_tokens": input_tokens if token_data_available else None,
             "output_tokens": output_tokens if token_data_available else None,
-            "total_tokens": (input_tokens + output_tokens) if token_data_available else None,
+            "total_tokens": (input_tokens + output_tokens)
+            if token_data_available
+            else None,
             "final_status": final_status,
         }
     )

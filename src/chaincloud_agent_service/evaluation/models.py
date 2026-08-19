@@ -47,6 +47,7 @@ class EvalCase(BaseModel):
     expected_permission: Literal["allow", "need_confirm", "deny", "none"] | None = None
     expected_memory_keys: list[str] | None = None
     tags: list[str] = Field(default_factory=list)
+    required_capabilities: list[str] = Field(default_factory=list)
     turns: list[EvalTurn] = Field(default_factory=list)
     fault_injection: list[FaultSpec] = Field(default_factory=list)
     planning: Literal["auto", "direct", "planned"] = "auto"
@@ -67,6 +68,7 @@ class EvalObservation(BaseModel):
     latency_ms: float | None = None
     error: str | None = None
     turn_observations: list[dict[str, Any]] = Field(default_factory=list)
+    response_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class CheckResult(BaseModel):

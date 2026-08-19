@@ -19,6 +19,8 @@ class AgentAdapter(Protocol):
 class HttpAgentAdapter:
     """Calls only the public Agent API; ground truth is never serialized."""
 
+    unsupported_capabilities = {"fault_injection"}
+
     def __init__(
         self, endpoint: str, *, token: str | None = None, timeout: float = 180
     ) -> None:
@@ -78,6 +80,11 @@ class HttpAgentAdapter:
                 execution_trace=trace,
                 latency_ms=(time.perf_counter() - started) * 1000,
                 turn_observations=turns[:-1],
+                response_metadata={
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"reply", "trace", "execution_trace"}
+                },
             )
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             return EvalObservation(
@@ -92,6 +99,7 @@ class ReplayAdapter:
     """Offline adapter for CI/evaluator tests. The file contains observations, never cases."""
 
     def __init__(self, path: str | Path) -> None:
+        self.unsupported_capabilities: set[str] = set()
         self.rows = {}
         with Path(path).open(encoding="utf-8") as handle:
             for line in handle:
