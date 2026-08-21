@@ -116,7 +116,11 @@ def make_pg_list_tables_tool(dsn: str) -> StructuredTool:
 
     return StructuredTool.from_function(
         name="postgres_list_tables",
-        description="列出 PostgreSQL 中当前只读账号可见的业务表。查询表数据前可先调用它确认表名。",
+        description=(
+            "Schema recovery 工具：列出 PostgreSQL 中当前只读账号可见的业务表。"
+            "仅在目标表名未知，或目标 SQL 已返回 undefined_table/表不存在错误时使用；"
+            "不要在已知 table mapping 的正常查询前调用。"
+        ),
         func=_invoke,
     )
 
@@ -131,7 +135,9 @@ def make_pg_table_schema_tool(dsn: str) -> StructuredTool:
     return StructuredTool.from_function(
         name="postgres_table_schema",
         description=(
-            "获取指定 PostgreSQL 表的字段、类型、可空信息和前 3 行样本。"
+            "Schema recovery 工具：获取指定 PostgreSQL 表的字段、类型、可空信息和前 3 行样本。"
+            "仅在目标 SQL 已返回 undefined_column、类型不匹配或其他 schema mismatch 时使用；"
+            "不要重复确认 trusted schema 中已有的字段。"
             "table_name 支持 schema.table，例如 loan.aave_v3_eth_positions_borrow。"
         ),
         func=_invoke,

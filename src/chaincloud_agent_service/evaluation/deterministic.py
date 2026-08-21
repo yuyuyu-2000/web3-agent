@@ -97,6 +97,11 @@ def evaluate_case(case: EvalCase, observation: EvalObservation) -> CaseResult:
     if case.expected_permission is not None:
         expected_permission = case.expected_permission
         if expected_permission == "none":
+            permission_ok = not any(
+                action in {"need_confirm", "need-confirm", "deny"}
+                for action in permission_actions
+            )
+        elif expected_permission == "not_checked":
             permission_ok = not permission_actions
         else:
             aliases = {

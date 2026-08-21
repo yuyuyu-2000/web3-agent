@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from langchain_core.messages import AIMessage
 
 from chaincloud_agent_service.agent.planning.models import Plan, PlanStep
 from chaincloud_agent_service.agent.planning.planner import PLANNER_SYSTEM_PROMPT, create_plan
+from chaincloud_agent_service.agent.schema_context import build_planner_trusted_schema_facts
 from chaincloud_agent_service.agent.planning.validator import (
     PlanValidationError,
     validate_plan,
@@ -107,3 +110,38 @@ def test_planner_prompt_uses_flexible_four_call_default() -> None:
     assert "默认应能在最多 4 次工具调用内完成" in PLANNER_SYSTEM_PROMPT
     assert "budget_reason" in PLANNER_SYSTEM_PROMPT
     assert "不要机械地把每次工具调用拆成单独步骤" in PLANNER_SYSTEM_PROMPT
+
+
+def test_planner_prompt_requires_minimal_plan_and_recovery_only_discovery() -> None:
+    assert "Minimal Sufficient Plan" in PLANNER_SYSTEM_PROMPT
+    assert "正常路径不得加入 postgres_list_tables" in PLANNER_SYSTEM_PROMPT
+    assert "schema discovery 是 recovery" in PLANNER_SYSTEM_PROMPT
+    assert "确认最大值是否并列" in PLANNER_SYSTEM_PROMPT
+    assert "自动调用 Answer Composer" in PLANNER_SYSTEM_PROMPT
+    assert "不要为“汇总结果”" in PLANNER_SYSTEM_PROMPT
+
+
+def test_planner_trusted_schema_facts_are_compact_and_share_schema_source() -> None:
+    settings = SimpleNamespace(agent_database_schema_path="config/agent_database_schema.md")
+
+    facts = build_planner_trusted_schema_facts(settings)  # type: ignore[arg-type]
+
+    assert "schema_source=config/agent_database_schema.md" in facts
+    assert "JustLend,justlend->public.justlend" in facts
+    assert "croas_chain,cross_chain->public.croas_chain" in facts
+    assert "known_columns=day,occurred,ingested_at" in facts
+    assert "tx_hash" in facts
+    assert "amount_usd" in facts
+    assert "deposit_tx_hash" in facts
+    assert "SELECT" not in facts
+    assert "重要限制" not in facts
+    assert len(facts) < 1500
+
+
+def test_planner_trusted_schema_facts_degrade_when_source_is_unavailable() -> None:
+    settings = SimpleNamespace(agent_database_schema_path=None)
+
+    facts = build_planner_trusted_schema_facts(settings)  # type: ignore[arg-type]
+
+    assert "无已加载" in facts
+    assert "表或字段未知时才规划 schema discovery" in facts

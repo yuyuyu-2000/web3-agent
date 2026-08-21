@@ -32,7 +32,10 @@ from chaincloud_agent_service.agent.rolling_summary import (
 )
 from chaincloud_agent_service.agent.routing import decide_route
 from chaincloud_agent_service.agent.routing.router import ROUTER_SYSTEM_PROMPT
-from chaincloud_agent_service.agent.schema_context import build_agent_system_prompt
+from chaincloud_agent_service.agent.schema_context import (
+    build_agent_system_prompt,
+    build_planner_trusted_schema_facts,
+)
 from chaincloud_agent_service.agent.state import AgentState
 from chaincloud_agent_service.agent.state_validation import validate_step_state
 from chaincloud_agent_service.agent.monitor_draft import (
@@ -190,6 +193,12 @@ def compile_agent_graph(
         str(getattr(tool, "name", tool.__class__.__name__)) for tool in tools
     }
     system_prompt = build_agent_system_prompt(settings)
+    planner_trusted_schema_facts = build_planner_trusted_schema_facts(settings)
+    planner_system_prompt = (
+        f"{PLANNER_SYSTEM_PROMPT}\n\n"
+        "Trusted schema facts（仅用于规划；已确认事实无需重复探查）：\n"
+        f"{planner_trusted_schema_facts}"
+    )
     context_builder = ContextBuilder.from_settings(settings)
     rolling_summary = RollingSummaryManager.from_settings(settings)
     base_model = ChatOpenAI(
@@ -527,7 +536,7 @@ def compile_agent_graph(
         ) or "当前没有可用工具。"
         def build(current: AgentState):
             return context_builder.planner(
-                system_prompt=PLANNER_SYSTEM_PROMPT, current_request=goal,
+                system_prompt=planner_system_prompt, current_request=goal,
                 history=active_messages(current), tool_catalog=catalog,
                 conversation_summary=current.get("conversation_summary"),
             )
@@ -779,6 +788,8 @@ def compile_agent_graph(
                 "\n最近工具错误（结构化事实）："
                 f"{json.dumps(state['last_tool_errors'], ensure_ascii=False)}\n"
                 "仅瞬时错误由工具层自动重试。请做语义修复：可修正参数、补充查询或使用计划声明的 fallback。"
+                "postgres_list_tables/postgres_table_schema 仅用于已发生的 undefined_table、"
+                "undefined_column、类型不匹配或其他 schema mismatch；目标 SQL 未出现这类错误时不得探查 schema。"
                 "权限/guardrail 错误严禁用等价工具绕过；缺少关键结果时不得编造。"
             )
         combined_prompt = system_prompt
@@ -1088,7 +1099,7 @@ def compile_agent_graph(
         ) or "当前没有可用工具。"
         def build(current: AgentState):
             return context_builder.planner(
-                system_prompt=PLANNER_SYSTEM_PROMPT, current_request=old_plan.goal,
+                system_prompt=planner_system_prompt, current_request=old_plan.goal,
                 history=active_messages(current), tool_catalog=catalog, feedback=context,
                 conversation_summary=current.get("conversation_summary"),
             )

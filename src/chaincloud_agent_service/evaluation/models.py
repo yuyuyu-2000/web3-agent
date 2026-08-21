@@ -44,7 +44,9 @@ class EvalCase(BaseModel):
     ground_truth: GroundTruth
     expected_tools: list[str] | None = None
     expected_arguments: list[ArgumentConstraint] = Field(default_factory=list)
-    expected_permission: Literal["allow", "need_confirm", "deny", "none"] | None = None
+    expected_permission: Literal[
+        "allow", "need_confirm", "deny", "none", "not_checked"
+    ] | None = None
     expected_memory_keys: list[str] | None = None
     tags: list[str] = Field(default_factory=list)
     required_capabilities: list[str] = Field(default_factory=list)

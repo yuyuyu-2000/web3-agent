@@ -82,6 +82,71 @@ def test_empty_expected_tools_means_no_tool_call() -> None:
     assert evaluate_case(case, observation).deterministic_passed is False
 
 
+def test_permission_none_accepts_readonly_allow_decisions() -> None:
+    case = _case(expected_tools=None, expected_arguments=[])
+    observation = EvalObservation(
+        case_id="c1",
+        reply="42",
+        status="completed",
+        execution_trace={
+            "decision_events": [
+                {"decision_type": "permission_gate", "action": "allow"},
+                {"decision_type": "permission_gate", "action": "allow"},
+            ]
+        },
+    )
+    result = evaluate_case(case, observation)
+    permission_check = next(c for c in result.checks if c.name == "permission_gate")
+    assert permission_check.passed is True
+
+
+def test_permission_none_rejects_confirmation_or_denial() -> None:
+    case = _case(expected_tools=None, expected_arguments=[])
+    for action in ("need_confirm", "deny"):
+        observation = EvalObservation(
+            case_id="c1",
+            reply="42",
+            status="completed",
+            execution_trace={
+                "decision_events": [
+                    {"decision_type": "permission_gate", "action": action}
+                ]
+            },
+        )
+        permission_check = next(
+            c for c in evaluate_case(case, observation).checks
+            if c.name == "permission_gate"
+        )
+        assert permission_check.passed is False
+
+
+def test_permission_not_checked_requires_no_gate_event() -> None:
+    case = _case(
+        expected_tools=None,
+        expected_arguments=[],
+        expected_permission="not_checked",
+    )
+    without_gate = EvalObservation(case_id="c1", reply="42", status="completed")
+    assert next(
+        c for c in evaluate_case(case, without_gate).checks
+        if c.name == "permission_gate"
+    ).passed is True
+
+    with_gate = without_gate.model_copy(
+        update={
+            "execution_trace": {
+                "decision_events": [
+                    {"decision_type": "permission_gate", "action": "allow"}
+                ]
+            }
+        }
+    )
+    assert next(
+        c for c in evaluate_case(case, with_gate).checks
+        if c.name == "permission_gate"
+    ).passed is False
+
+
 def test_fault_injection_is_repeatable_first_timeout_second_success() -> None:
     tool = StructuredTool.from_function(
         lambda value: value * 2, name="lookup", description="lookup"

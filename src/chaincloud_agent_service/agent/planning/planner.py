@@ -41,9 +41,13 @@ JSON 格式：
 5. 创建、修改外部状态的步骤必须设置 requires_confirmation=true。
 6. critical 表示缺失该步骤结果是否会使目标无法可靠完成；有等价降级工具时写入 fallback_tools。
 7. 每个步骤默认应能在最多 4 次工具调用内完成；如果明确需要更多，estimated_tool_calls 可大于 4，并必须在 budget_reason 说明必要性。运行时只有全局剩余预算充足才会批准扩大。不要机械地把每次工具调用拆成单独步骤。
-8. 一个步骤只设一个主要、可验证的数据目标。定位数据源、确认结构、查询明细、统计分析如果合计会超过默认额度，应拆成有依赖关系的步骤。
-9. 已知表名时不要重复调用列举表工具；能够用一条聚合 SQL 同时确认日期覆盖、记录数和金额分布时，不要拆成多次探查。
-10. “大额”没有明确阈值时不要停止任务：优先采用 amount_usd >= 100000；若当日数据分布适合动态口径，可采用当日金额前 5%，并在最终结果中明确说明口径。
+8. 一个步骤只设一个主要、可验证的数据目标；按动态数据依赖拆步，不要按工具数量机械拆步。
+9. 遵循 Minimal Sufficient Plan：正常路径中的每一步都必须直接贡献于用户目标、success criteria、必要证据或权限边界。若删除某步不影响这四项，该步不应加入计划。
+10. trusted schema facts 中已确认 table mapping 和 required columns 时，直接规划目标查询。正常路径不得加入 postgres_list_tables 或 postgres_table_schema 来重复确认已知事实。
+11. schema discovery 是 recovery：仅当目标 SQL 已实际因 undefined_table、undefined_column 或 schema/type mismatch 失败后，才使用 postgres_list_tables 或 postgres_table_schema 修复并重试。不要把 recovery 预先写成正常前置步骤。
+12. 不执行用户未要求且 success criteria 不依赖的额外验证；“更全面”“顺便确认”“确认最大值是否并列”本身都不是增加查询的充分理由。只有不消除真实歧义就无法正确回答时才增加验证。
+13. “大额”没有明确阈值时不要停止任务：优先采用 amount_usd >= 100000；若用户目标确实要求相对分布口径，可采用当日金额前 5%，并在最终结果中明确说明口径。
+14. 系统会在所有取证步骤完成后自动调用 Answer Composer 形成最终比较、整合和说明。不要为“汇总结果”“比较来源”“形成报告”单独规划 step，也不要在整合阶段重复调用已经成功的取证工具。只有产生新的、用户必需的数据才需要新 step。
 """
 
 

@@ -87,6 +87,68 @@ def test_state_validation_fails_for_unavailable_tool() -> None:
     assert decision.resolution == "fail"
 
 
+def test_state_validation_accepts_bare_tron_txid_from_dependency_facts() -> None:
+    txid = "a" * 64
+    decision = validate_step_state(
+        PlanStep(
+            id="step_2",
+            objective="查询该交易的 TRON 本体与回执",
+            success_criteria="返回链上交易结果",
+            suggested_tools=["get_tron_transaction"],
+            depends_on=["step_1"],
+        ),
+        conversation_text="查询上一步得到的交易",
+        dependency_results=[
+            {
+                "step_id": "step_1",
+                "status": "success",
+                "structured_facts": [{"sample": [{"tx_hash": txid}]}],
+            }
+        ],
+        clarified_state={},
+        available_tool_names={"get_tron_transaction"},
+    )
+    assert decision.action == "VALID"
+
+
+def test_state_validation_reads_deposit_tx_hash_from_dependency_facts() -> None:
+    decision = validate_step_state(
+        PlanStep(
+            id="step_2",
+            objective="使用依赖结果核验交易",
+            success_criteria="TRON 查询完成",
+            suggested_tools=["get_tron_transaction"],
+        ),
+        conversation_text="核验数据库结果",
+        dependency_results=[
+            {
+                "structured_facts": [
+                    {"sample": [{"deposit_tx_hash": "B" * 64}]}
+                ]
+            }
+        ],
+        clarified_state={},
+        available_tool_names={"get_tron_transaction"},
+    )
+    assert decision.action == "VALID"
+
+
+def test_transaction_hash_does_not_satisfy_address_validation() -> None:
+    decision = validate_step_state(
+        PlanStep(
+            id="step_1",
+            objective="查询该地址",
+            success_criteria="返回该地址的信息",
+        ),
+        conversation_text="41" + "a" * 62,
+        dependency_results=[],
+        clarified_state={},
+        available_tool_names=set(),
+    )
+    assert decision.action == "MISSING"
+    assert decision.missing_state[0].field == "address_identifier"
+
+
 def test_graph_pauses_and_resumes_after_exact_permission_approval() -> None:
     tool = StructuredTool.from_function(
         name="add_scheduled_task", description="create task", func=lambda **_: "created"
