@@ -280,6 +280,21 @@ def build_request_summary(state: dict[str, Any]) -> dict[str, Any]:
                 for event in tool_events
                 if event.get("fallback_tool") and event.get("status") == "success"
             ),
+            "executor_fast_path_hits": sum(
+                1 for event in decision_events
+                if event.get("decision_type") == "executor_fast_path"
+                and event.get("action") == "hit"
+            ),
+            "executor_fast_path_rejects": sum(
+                1 for event in decision_events
+                if event.get("decision_type") == "executor_fast_path"
+                and event.get("action") == "reject"
+            ),
+            "executor_fast_path_fallbacks": sum(
+                1 for event in decision_events
+                if event.get("decision_type") == "executor_fast_path"
+                and event.get("fallback_to_executor") is True
+            ),
             "errors": len(error_events),
             "context_builds": len(context_events),
             "context_trimmed_items": sum(

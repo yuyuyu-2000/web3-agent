@@ -31,6 +31,8 @@ def test_small_result_stays_uncompressed_but_is_traceable(tmp_path) -> None:
     assert message.content == raw
     assert metadata["compressed"] is False
     assert store.read(metadata["result_id"]) == raw
+    assert metadata["result_contract"]["result_kind"] == "tabular_query"
+    assert metadata["result_contract"]["provenance_complete"] is True
 
 
 def test_large_sql_result_is_compressed_with_structured_facts(tmp_path) -> None:
@@ -129,3 +131,141 @@ def test_context_summary_can_be_created_for_old_small_result(tmp_path) -> None:
 
     assert len(compacted.content) > 0
     assert metadata["result_id"] in str(compacted.content)
+
+
+def _tron_raw_result() -> str:
+    transfer_topic = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    return json.dumps(
+        {
+            "provider": "tron_public_node",
+            "txid": "a" * 64,
+            "transaction": {
+                "txID": "a" * 64,
+                "signature": ["secret-signature-material"],
+                "raw_data_hex": "deadbeef" * 100,
+                "raw_data": {
+                    "timestamp": 1_700_000_000_000,
+                    "contract": [
+                        {
+                            "type": "TriggerSmartContract",
+                            "parameter": {
+                                "type_url": "type.googleapis.com/protocol.TriggerSmartContract",
+                                "value": {
+                                    "owner_address": "41" + "1" * 40,
+                                    "contract_address": "41" + "2" * 40,
+                                    "data": "private-call-data" * 20,
+                                },
+                            },
+                        }
+                    ],
+                },
+                "ret": [{"contractRet": "SUCCESS"}],
+            },
+            "transaction_info": {
+                "id": "a" * 64,
+                "blockNumber": 123,
+                "blockTimeStamp": 1_700_000_000_100,
+                "fee": 456,
+                "contract_address": "41" + "3" * 40,
+                "receipt": {
+                    "result": "SUCCESS",
+                    "energy_usage_total": 789,
+                    "energy_fee": 100,
+                    "net_fee": 20,
+                    "opaque_receipt_payload": "do-not-expose",
+                },
+                "log": [
+                    {
+                        "address": "41" + "4" * 40,
+                        "topics": [
+                            transfer_topic,
+                            "0" * 24 + "5" * 40,
+                            "0" * 24 + "6" * 40,
+                        ],
+                        "data": f"{1_000_000:064x}",
+                        "opaque_log_payload": "do-not-expose",
+                    }
+                ],
+                "internal_transactions": [
+                    {"hash": "internal-secret", "callValueInfo": [{"callValue": 1}]}
+                ],
+            },
+        }
+    )
+
+
+def test_tron_transaction_result_always_uses_canonical_contract(tmp_path) -> None:
+    raw = _tron_raw_result()
+    store, message, metadata = _processed(
+        tmp_path, "get_tron_transaction", raw, threshold=1_000_000
+    )
+    payload = json.loads(message.content)
+
+    assert metadata["representation"] == "canonical_tron_transaction"
+    assert metadata["compressed"] is True
+    assert payload == metadata["structured_facts"]
+    assert payload["result_id"] == metadata["result_id"]
+    assert payload["txid"] == "a" * 64
+    assert payload["transaction_status"] == "SUCCESS"
+    assert payload["receipt_status"] == "SUCCESS"
+    assert payload["block_number"] == 123
+    assert payload["block_timestamp"] == 1_700_000_000_100
+    assert payload["fee"] == 456
+    assert payload["contract_type"] == "TriggerSmartContract"
+    assert payload["owner_address"] == "41" + "1" * 40
+    assert payload["contract_address"] == "41" + "2" * 40
+    assert payload["internal_transaction_count"] == 1
+    assert payload["log_count"] == 1
+    assert payload["transfer_summaries"] == [
+        {
+            "log_index": 0,
+            "token_contract": "41" + "4" * 40,
+            "from_address": "41" + "5" * 40,
+            "to_address": "41" + "6" * 40,
+            "raw_amount": "1000000",
+        }
+    ]
+    assert store.read(payload["result_id"]) == raw
+    assert metadata["result_contract"]["terminal"] is True
+    assert metadata["result_contract"]["structured_facts_complete"] is True
+    assert metadata["result_contract"]["ambiguity"] == []
+
+
+def test_tron_tool_message_excludes_full_raw_sections(tmp_path) -> None:
+    raw = _tron_raw_result()
+    _, message, metadata = _processed(
+        tmp_path, "get_tron_transaction", raw, threshold=1_000_000
+    )
+
+    exposed = str(message.content)
+    assert "signature" not in exposed
+    assert "raw_data_hex" not in exposed
+    assert "private-call-data" not in exposed
+    assert "opaque_receipt_payload" not in exposed
+    assert "opaque_log_payload" not in exposed
+    assert "internal-secret" not in exposed
+    assert metadata["context_summary"]["preview"] == ""
+    assert "signature" not in json.dumps(metadata["structured_facts"])
+
+
+def test_tron_canonical_result_stays_canonical_as_dependency_evidence(tmp_path) -> None:
+    raw = _tron_raw_result()
+    _, dependency, metadata = _processed(
+        tmp_path, "get_tron_transaction", raw, threshold=1_000_000
+    )
+    builder = ContextBuilder("unknown-model", 4000, 3000, 500)
+    result = builder.executor(
+        scene="planned_executor",
+        system_prompt="rules",
+        current_request="analyse",
+        critical_state="summarize receipt",
+        messages=[HumanMessage(content="analyse")],
+        dependency_evidence=[dependency],
+    )
+
+    dependency_message = next(
+        message for message in result.messages if isinstance(message, ToolMessage)
+    )
+    assert dependency_message.content == dependency.content
+    assert metadata["result_id"] in str(dependency_message.content)
+    assert "raw_data_hex" not in str(dependency_message.content)

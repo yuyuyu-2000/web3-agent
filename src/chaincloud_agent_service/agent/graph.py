@@ -38,6 +38,9 @@ from chaincloud_agent_service.agent.schema_context import (
 )
 from chaincloud_agent_service.agent.state import AgentState
 from chaincloud_agent_service.agent.state_validation import validate_step_state
+from chaincloud_agent_service.agent.step_result_fast_path import (
+    build_deterministic_step_result,
+)
 from chaincloud_agent_service.agent.monitor_draft import (
     create_monitor_draft,
     is_monitor_creation_request,
@@ -900,7 +903,38 @@ def compile_agent_graph(
         )
         if permission_error:
             return "permission_failure"
-        return "direct" if state.get("execution_mode") == "direct" else "planned"
+        return "direct" if state.get("execution_mode") == "direct" else "fast_path"
+
+    def deterministic_step_result_node(state: AgentState) -> dict[str, Any]:
+        plan = _plan_from_state(state)
+        current_step_id = state.get("current_step_id")
+        step = next(item for item in plan.steps if item.id == current_step_id)
+        messages = list(state["messages"])
+        step_messages = messages[int(state.get("step_message_start", 0)) :]
+        decision = build_deterministic_step_result(
+            step=step,
+            step_messages=step_messages,
+            last_tool_errors=state.get("last_tool_errors", []),
+            step_tool_call_count=int(state.get("step_tool_call_count", 0)),
+        )
+        update: dict[str, Any] = {
+            "candidate_step_result": (
+                decision.result.model_dump() if decision.result is not None else None
+            ),
+        }
+        append_trace_event(state, update, "decision_events", {
+            "trace_id": state.get("trace_id"),
+            "thread_id": state.get("trace_thread_id"),
+            "decision_type": "executor_fast_path",
+            "action": "hit" if decision.hit else "reject",
+            "reason": decision.reason,
+            "step_id": current_step_id,
+            "fallback_to_executor": not decision.hit,
+        })
+        return update
+
+    def deterministic_step_result_route(state: AgentState) -> str:
+        return "evaluator" if state.get("candidate_step_result") else "executor"
 
     def permission_failure_node(state: AgentState) -> dict[str, Any]:
         error = next(
@@ -1284,6 +1318,10 @@ def compile_agent_graph(
     builder.add_node("state_validation", state_validation_node)
     builder.add_node("blocked_missing_state", blocked_missing_state_node)
     builder.add_node("executor", traced_node("executor", executor_node))
+    builder.add_node(
+        "deterministic_step_result",
+        traced_node("deterministic_step_result", deterministic_step_result_node),
+    )
     builder.add_node("complete_step", complete_step_node)
     builder.add_node("evaluator", traced_node("evaluator", evaluator_node))
     builder.add_node("replan", traced_node("replan", replan_node))
@@ -1366,7 +1404,16 @@ def compile_agent_graph(
         builder.add_conditional_edges(
             "tools",
             tools_route,
-            {"direct": "direct_agent", "planned": "executor", "permission_failure": "permission_failure"},
+            {
+                "direct": "direct_agent",
+                "fast_path": "deterministic_step_result",
+                "permission_failure": "permission_failure",
+            },
+        )
+        builder.add_conditional_edges(
+            "deterministic_step_result",
+            deterministic_step_result_route,
+            {"evaluator": "evaluator", "executor": "executor"},
         )
         builder.add_edge("permission_failure", "execution_completed")
     builder.add_edge("budget_exceeded", "review_gate")

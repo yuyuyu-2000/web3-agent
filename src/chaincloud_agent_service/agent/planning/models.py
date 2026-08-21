@@ -29,6 +29,8 @@ class StepResult(BaseModel):
     summary: str
     evidence: list[str] = Field(default_factory=list)
     structured_facts: list[dict[str, Any]] = Field(default_factory=list)
+    dependency_outputs: dict[str, Any] = Field(default_factory=dict)
     result_references: list[dict[str, Any]] = Field(default_factory=list)
+    provenance: list[dict[str, Any]] = Field(default_factory=list)
     tool_calls: list[str] = Field(default_factory=list)
     error: str | None = None
