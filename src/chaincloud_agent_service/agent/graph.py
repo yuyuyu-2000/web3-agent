@@ -14,7 +14,10 @@ from chaincloud_agent_service.agent.answer_composer import acompose_final_answer
 from chaincloud_agent_service.agent.answer_composer.complexity import choose_answer_style
 from chaincloud_agent_service.agent.answer_composer.composer import _system_prompt_for_style
 from chaincloud_agent_service.agent.context_builder import ContextBuilder
-from chaincloud_agent_service.agent.evaluation import evaluate_step
+from chaincloud_agent_service.agent.evaluation import (
+    evaluate_step,
+    validate_deterministic_step,
+)
 from chaincloud_agent_service.agent.planning import Plan, StepResult, create_plan
 from chaincloud_agent_service.agent.planning.planner import PLANNER_SYSTEM_PROMPT
 from chaincloud_agent_service.agent.permission import evaluate_step_permission
@@ -934,7 +937,35 @@ def compile_agent_graph(
         return update
 
     def deterministic_step_result_route(state: AgentState) -> str:
-        return "evaluator" if state.get("candidate_step_result") else "executor"
+        return "machine_validator" if state.get("candidate_step_result") else "executor"
+
+    def machine_step_validator_node(state: AgentState) -> dict[str, Any]:
+        plan = _plan_from_state(state)
+        current_step_id = state.get("current_step_id")
+        step = next(item for item in plan.steps if item.id == current_step_id)
+        candidate = StepResult.model_validate(state.get("candidate_step_result"))
+        decision = validate_deterministic_step(
+            step=step,
+            result=candidate,
+            prior_step_results=state.get("step_results", []),
+            tool_result_records=state.get("tool_result_records", []),
+            last_tool_errors=state.get("last_tool_errors", []),
+            tool_events=state.get("tool_events", []),
+        )
+        update: dict[str, Any] = {}
+        append_trace_event(state, update, "decision_events", {
+            "trace_id": state.get("trace_id"),
+            "thread_id": state.get("trace_thread_id"),
+            "decision_type": "machine_step_validator",
+            "action": decision.decision,
+            "reason": decision.reason,
+            "checked_predicates": [item.model_dump() for item in decision.checked_predicates],
+            "validator_version": decision.validator_version,
+            "result_kind": decision.result_kind,
+            "step_id": current_step_id,
+            "shadow_mode": True,
+        })
+        return update
 
     def permission_failure_node(state: AgentState) -> dict[str, Any]:
         error = next(
@@ -1322,6 +1353,10 @@ def compile_agent_graph(
         "deterministic_step_result",
         traced_node("deterministic_step_result", deterministic_step_result_node),
     )
+    builder.add_node(
+        "machine_step_validator",
+        traced_node("machine_step_validator", machine_step_validator_node),
+    )
     builder.add_node("complete_step", complete_step_node)
     builder.add_node("evaluator", traced_node("evaluator", evaluator_node))
     builder.add_node("replan", traced_node("replan", replan_node))
@@ -1413,8 +1448,9 @@ def compile_agent_graph(
         builder.add_conditional_edges(
             "deterministic_step_result",
             deterministic_step_result_route,
-            {"evaluator": "evaluator", "executor": "executor"},
+            {"machine_validator": "machine_step_validator", "executor": "executor"},
         )
+        builder.add_edge("machine_step_validator", "evaluator")
         builder.add_edge("permission_failure", "execution_completed")
     builder.add_edge("budget_exceeded", "review_gate")
     builder.add_edge("complete_step", "evaluator")

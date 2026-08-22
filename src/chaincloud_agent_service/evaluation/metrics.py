@@ -85,6 +85,38 @@ def aggregate(results: list[CaseResult]) -> dict[str, Any]:
         for category in sorted({r.category for r in results})
         if (group := [r for r in results if r.category == category])
     }
+    machine_decisions = [
+        event
+        for result in results
+        for event in result.observation.execution_trace.get("decision_events", [])
+        if event.get("decision_type") == "machine_step_validator"
+    ]
+    llm_actions = {
+        (result.case_id, str(event.get("step_id"))): str(event.get("action"))
+        for result in results
+        for event in result.observation.execution_trace.get("decision_events", [])
+        if event.get("decision_type") == "evaluator"
+    }
+    machine_rows = [
+        (result.case_id, event)
+        for result in results
+        for event in result.observation.execution_trace.get("decision_events", [])
+        if event.get("decision_type") == "machine_step_validator"
+    ]
+    result_kinds = sorted({str(event.get("result_kind") or "unknown") for event in machine_decisions})
+    conflicts_by_kind = {}
+    for kind in result_kinds:
+        rows = [(case_id, event) for case_id, event in machine_rows if str(event.get("result_kind") or "unknown") == kind]
+        passes = [(case_id, event) for case_id, event in rows if event.get("action") == "pass"]
+        conflicts = sum(
+            llm_actions.get((case_id, str(event.get("step_id")))) not in {None, "pass"}
+            for case_id, event in passes
+        )
+        conflicts_by_kind[kind] = {
+            "machine_passes": len(passes),
+            "machine_pass_llm_non_pass_conflicts": conflicts,
+            "conflict_rate": conflicts / len(passes) if passes else None,
+        }
     return {
         "overall": overall,
         "performance": {
@@ -106,6 +138,18 @@ def aggregate(results: list[CaseResult]) -> dict[str, Any]:
         "memory": {
             "retrieval_hit_rate": _check_rate(results, "memory_hit"),
             "retrieval_accuracy": _check_rate(results, "memory_accuracy"),
+        },
+        "machine_step_validator": {
+            "decisions": len(machine_decisions),
+            "pass": sum(event.get("action") == "pass" for event in machine_decisions),
+            "fail": sum(event.get("action") == "fail" for event in machine_decisions),
+            "unknown": sum(event.get("action") == "unknown" for event in machine_decisions),
+            "machine_pass_llm_non_pass_conflicts": sum(
+                llm_actions.get((case_id, str(event.get("step_id")))) not in {None, "pass"}
+                for case_id, event in machine_rows
+                if event.get("action") == "pass"
+            ),
+            "by_result_kind": conflicts_by_kind,
         },
         "by_category": by_category,
     }

@@ -241,6 +241,15 @@ def build_request_summary(state: dict[str, Any]) -> dict[str, Any]:
     rolling_summary_calls = sum(
         1 for event in compact_events if event.get("status") in {"success", "failed"}
     )
+    machine_decisions = [
+        event for event in decision_events
+        if event.get("decision_type") == "machine_step_validator"
+    ]
+    evaluator_by_step = {
+        str(event.get("step_id")): str(event.get("action"))
+        for event in decision_events
+        if event.get("decision_type") == "evaluator"
+    }
     input_tokens = output_tokens = 0
     token_data_available = False
     for message in state.get("messages", []):
@@ -294,6 +303,20 @@ def build_request_summary(state: dict[str, Any]) -> dict[str, Any]:
                 1 for event in decision_events
                 if event.get("decision_type") == "executor_fast_path"
                 and event.get("fallback_to_executor") is True
+            ),
+            "machine_validator_passes": sum(
+                event.get("action") == "pass" for event in machine_decisions
+            ),
+            "machine_validator_failures": sum(
+                event.get("action") == "fail" for event in machine_decisions
+            ),
+            "machine_validator_unknowns": sum(
+                event.get("action") == "unknown" for event in machine_decisions
+            ),
+            "machine_pass_llm_non_pass_conflicts": sum(
+                event.get("action") == "pass"
+                and evaluator_by_step.get(str(event.get("step_id"))) not in {None, "pass"}
+                for event in machine_decisions
             ),
             "errors": len(error_events),
             "context_builds": len(context_events),
