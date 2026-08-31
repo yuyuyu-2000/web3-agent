@@ -41,6 +41,13 @@ def test_transient_error_retries_inside_tool_node_then_succeeds() -> None:
     ]
     assert [event["attempt"] for event in result["tool_events"]] == [1, 2, 3]
     assert result["tool_events"][-1]["recovered"] is True
+    assert result["tool_events"][0]["failure_stage"] == "tool_execution"
+    assert result["tool_events"][0]["error_type"] == "timeout"
+    assert result["tool_events"][0]["original_tool"] == "lookup"
+    assert result["tool_events"][0]["selected_fallback"] is None
+    assert result["tool_events"][0]["recovery_action"] == "retry"
+    assert result["tool_events"][0]["attempt"] == 1
+    assert result["tool_events"][-1]["final_outcome"] == "success"
     assert len(result["tool_result_records"]) == 1
     assert result["tool_result_records"][0]["result_id"]
 

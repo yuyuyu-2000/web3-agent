@@ -8,10 +8,11 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from chaincloud_agent_service.agent.planning.models import PlanStep
+from chaincloud_agent_service.agent.fallback_resolver import BlockedToolUnavailable
 
 
-ValidationAction = Literal["VALID", "MISSING"]
-BlockResolution = Literal["clarification", "partial", "fail"]
+ValidationAction = Literal["VALID", "MISSING", "BLOCKED_TOOL_UNAVAILABLE"]
+BlockResolution = Literal["clarification", "fallback", "evaluate", "partial", "fail"]
 
 _TRANSACTION_ID_RE = re.compile(r"(?<![0-9a-fA-F])(?:0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])")
 _ADDRESS_RE = re.compile(
@@ -66,9 +67,14 @@ class StateValidationDecision:
     resolution: BlockResolution | None
     missing_state: list[MissingState]
     reason: str
+    blocked_tool_unavailable: BlockedToolUnavailable | None = None
 
     def model_dump(self) -> dict[str, Any]:
         payload = asdict(self)
+        if self.blocked_tool_unavailable is not None:
+            payload["blocked_tool_unavailable"] = (
+                self.blocked_tool_unavailable.model_dump()
+            )
         return payload
 
 
@@ -79,13 +85,38 @@ def validate_step_state(
     dependency_results: list[dict[str, Any]],
     clarified_state: dict[str, Any] | None,
     available_tool_names: set[str],
+    blocked_tool: BlockedToolUnavailable | None = None,
 ) -> StateValidationDecision:
     """Validate state required before Executor without consulting an LLM."""
+    completed_dependencies = {
+        str(item.get("step_id"))
+        for item in dependency_results
+        if item.get("status") == "success"
+    }
+    missing_dependencies = [
+        dependency for dependency in step.depends_on
+        if dependency not in completed_dependencies
+    ]
+    if missing_dependencies:
+        return StateValidationDecision(
+            "MISSING", step.id, "fail", [],
+            "步骤依赖尚未成功完成：" + ", ".join(missing_dependencies),
+        )
+
     unavailable = [name for name in step.suggested_tools if name not in available_tool_names]
     if unavailable:
         return StateValidationDecision(
-            "MISSING", step.id, "fail", [],
-            f"计划引用了当前不可用的工具：{', '.join(unavailable)}",
+            "BLOCKED_TOOL_UNAVAILABLE" if blocked_tool else "MISSING",
+            step.id,
+            (
+                "fallback" if blocked_tool and blocked_tool.recoverable
+                else ("evaluate" if blocked_tool else "fail")
+            ),
+            [],
+            blocked_tool.reason if blocked_tool else (
+                f"计划引用了当前不可用的工具：{', '.join(unavailable)}"
+            ),
+            blocked_tool,
         )
 
     clarified = clarified_state or {}

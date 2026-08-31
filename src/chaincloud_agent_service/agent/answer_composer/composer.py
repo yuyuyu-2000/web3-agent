@@ -67,10 +67,10 @@ def compose_final_answer(model: Any, messages: list[Any]) -> AIMessage:
 
 async def acompose_final_answer(
     model: Any, messages: list[Any], *, model_messages: list[Any] | None = None,
-    propagate_context_errors: bool = False,
+    propagate_context_errors: bool = False, fallback_draft: str | None = None,
 ) -> AIMessage:
     """Generate the final answer through the model's native async token stream."""
-    draft = _last_ai_text(messages)
+    draft = _last_ai_text(messages) if fallback_draft is None else fallback_draft
     parts: list[str] = []
 
     try:

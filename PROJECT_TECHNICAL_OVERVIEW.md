@@ -1,6 +1,6 @@
 # ChainCloud AI 当前项目技术说明
 
-> 生成日期：2026-08-19  
+> 更新日期：2026-08-22
 > 适用范围：当前 `Chaincloud-AI-main` 仓库  
 > 文档目标：用于项目交接、技术复盘、性能评估和面试展示。本文以当前代码为准，省略部分实现细节，但重点展开 Agent 框架、Memory、上下文工程、后台异步通知与 Evaluation Framework。
 
@@ -14,9 +14,10 @@ ChainCloud AI 是一个面向 TRON 链上数据分析、结构化业务数据库
 用户请求
   → 鉴权与 Memory 召回
   → Direct / Planned 路由
-  → Planner、Permission Gate、State Validation
-  → 工具执行与错误恢复
-  → Step Evaluator、Replan、Answer Composer、Reviewer
+  → Minimal Sufficient Planner、Permission Gate、State Validation
+  → 工具执行、Raw Result 持久化与确定性 StepResult Fast Path
+  → Machine Validator（shadow）、LLM Step Evaluator、Replan
+  → Answer Composer（execution state / draft 分离）、Reviewer
   → 保存 Checkpoint、Trace 和工具证据
   → 返回答案或等待确认/澄清
 ```
@@ -61,9 +62,11 @@ Chaincloud-AI-main/
 │   │   ├── state.py               # AgentState
 │   │   ├── routing/               # Direct / Planned 路由
 │   │   ├── planning/              # Plan 生成与验证
-│   │   ├── evaluation/            # 在线步骤 Evaluator
+│   │   ├── evaluation/            # LLM Evaluator 与 Machine Validator
 │   │   ├── review/                # 最终回答 Reviewer
 │   │   ├── answer_composer/       # 最终答案合成
+│   │   ├── step_result_fast_path.py # 确定性 StepResult 构造
+│   │   ├── tool_results.py        # Raw Result、canonical facts 与引用
 │   │   ├── context_builder.py     # 统一上下文预算
 │   │   ├── rolling_summary.py     # 滚动摘要
 │   │   ├── tool_recovery.py       # 工具错误分类与重试
@@ -155,7 +158,11 @@ Planned 路径适合：
 - 需要 Permission Gate 的副作用操作；
 - 需要步骤级成功标准、Retry 或 Replan 的任务。
 
-Planner 输出结构化 Plan，每个步骤包含目标、成功标准、依赖、建议工具、Fallback 和是否需要确认。Validator 检查步骤 ID、依赖关系和工具引用，避免无效计划直接进入执行。
+Planner 输出结构化 Plan，每个步骤包含目标、成功标准、依赖、建议工具、Fallback、预计工具调用数和是否需要确认。Validator 检查步骤 ID、依赖关系和工具引用，避免无效计划直接进入执行。
+
+当前 Planner 遵循 **Minimal Sufficient Plan**：正常路径中的每一步都必须直接贡献于用户目标、成功标准、必要证据或权限边界。简单任务通常只保留一个步骤；多工具任务按动态数据依赖拆分，而不是按工具数量机械拆步。已有 trusted schema facts 时直接规划目标查询，`postgres_list_tables` 和 `postgres_table_schema` 仅作为真实 schema/type 错误后的 recovery，不再作为默认前置步骤。最终汇总、跨来源比较和报告撰写由 Answer Composer 负责，Planner 不再额外创建只做“总结”的步骤。
+
+这项约束减少了 schema discovery、额外统计、重复验证和 synthetic summary 等不直接产生新证据的调用，同时保留权限确认、Fallback 和真正的数据依赖。
 
 ### 5.3 Permission Gate
 
@@ -184,9 +191,18 @@ State Validation 位于 Permission Gate 和 Executor 之间，用确定性规则
 
 缺失状态时系统进入 `blocked_missing_state`，通过结构化 `clarification_required` 请求用户补充；不能补齐时进入 Partial 或 Failed，而不是让模型猜测参数。
 
+State Validation 会读取前置步骤的结构化事实，例如把依赖结果中的交易哈希识别为后续 TRON 查询所需的 `txid`。字段匹配按语义和目标参数校验，交易哈希不会被误当成地址。这样，多工具链路可以把上一步的 canonical facts 正确绑定到下一步，而不依赖模型从 Raw JSON 中重新猜测。
+
 ### 5.5 工具循环与步骤评估
 
-Executor 可以在预算内多次调用工具。Planned 模式完成当前步骤后生成 `StepResult`，在线 Evaluator 根据步骤成功标准返回：
+Executor 可以在预算内多次调用工具。工具返回后先持久化 Raw Result，并生成 structured facts、result contract、`result_id` 和 provenance。Planned 模式随后有两条 `StepResult` 构造路径：
+
+1. **确定性 Fast Path**：仅限无未解决错误、实际和计划均为一次工具调用、单一终态结果、未截断、无歧义、facts/provenance 完整且 contract 明确允许的结果。当前白名单包括单行只读 PostgreSQL 结果和 canonical TRON transaction。代码直接构造可追溯的 `StepResult`，省去一次 Executor LLM 总结。
+2. **LLM Executor Fallback**：多行结果、多工具调用、错误恢复、contract 不完整或任何不满足安全条件的情况，继续由 Executor 生成自然语言步骤摘要，再构造 `StepResult`。
+
+确定性结果不是仅凭“工具调用成功”放行；`StepResult` 会保存 structured facts、dependency outputs、result references、provenance 和 tool calls，原始证据可通过 `result_id` 追溯。Fast Path 拒绝时只回退到原 Executor，不改变既有正确性路径。
+
+`StepResult` 构造完成后，在线 LLM Evaluator 根据步骤成功标准返回：
 
 ```text
 pass / retry / replan / partial / fail
@@ -200,6 +216,10 @@ pass / retry / replan / partial / fail
 - Partial 用于已有可信结果但数据覆盖或外部能力不足；
 - Permission 拒绝不能通过其他工具绕过。
 
+此外，系统已经接入保守的 **Machine Step Validator**。它对白名单语义检查结果状态、错误、重试/恢复、计划工具名、完整引用、终态 contract、截断和歧义、structured facts、成功标准字段、单行/标量约束、交易哈希格式、交易/回执状态以及依赖参数绑定。决策只有 `pass / fail / unknown`；任何自然语言成功标准无法被当前版本完整证明时都返回 `unknown`。
+
+当前 Machine Validator 运行在 **shadow mode**：每次结果和逐项 predicate 都写入 `decision_events`，但不改变路由，之后仍调用 LLM Evaluator。这为未来安全启用“machine pass 时跳过 LLM Evaluator”的 fast path 收集可审计数据，同时避免把“结构完整”误当成“步骤语义已成功”。
+
 ### 5.6 Answer Composer 与 Reviewer
 
 最终答案不是简单返回最后一个模型消息。Answer Composer 会整合：
@@ -210,6 +230,13 @@ pass / retry / replan / partial / fail
 - 数据范围和失败信息；
 - 图表 URL；
 - Partial/Degraded 状态。
+
+Composer 现在显式分离两个输入通道：
+
+- `execution_summary` 作为受保护的结构化执行状态，包含 mode、route、plan、全部 StepResult、status 和 failure reason；
+- `draft` 只接收当前用户轮次中的真实独立回答草稿。
+
+用于携带执行状态的 synthetic AIMessage 带有 `chaincloud_composer_role=execution_summary` 标记，不再被误选为 draft。Planned 模式下，若 Executor 输出已与 `StepResult.summary` 完全相同，则省略重复 draft；Direct 模式仍保留真实 Agent draft；Reviewer revision 则显式保留上一版答案和修订意见。Composer 调用失败时也使用同一份已筛选 draft 作为 fallback，避免重新拾取 synthetic summary。
 
 Reviewer 检查最终答案与工具证据是否一致、是否越过数据边界、是否需要修改。复杂 Planned 任务默认进入 Reviewer；Direct 路径在风险较高或工具链较复杂时也可进入审查。
 
@@ -383,15 +410,15 @@ Raw Tool Result
 
 #### Raw Result
 
-完整结果写入 `tool_results/`，保存工具名、参数、时间、SHA-256 和原始内容，便于审计和重新读取。
+所有进入该链路的完整结果先写入 `tool_results/`，保存工具名、参数、时间、SHA-256、证据来源和原始内容，便于审计和重新读取。Agent Graph 不再直接承载 TRON Raw JSON。
 
 #### Structured Facts
 
-确定性提取状态、标量、字段、数量和少量样例。Planned StepResult 保存这些事实和 Raw Result 引用。
+确定性提取状态、标量、字段、数量和少量样例。TRON 交易结果使用固定 canonical transaction contract；Planned StepResult 保存这些 facts、dependency outputs、Raw Result 引用与 provenance。
 
 #### Context Summary
 
-超过压缩阈值的结果进入模型前替换为短摘要、Preview 和 `result_id`。错误结果保留关键错误载荷，避免压缩破坏 Retry、Permission 或 Fallback 判断。
+超过压缩阈值的普通结果进入模型前替换为短摘要、Preview 和 `result_id`；canonical TRON 结果无论大小都以 canonical facts 进入上下文。错误结果保留关键错误载荷，避免压缩破坏 Retry、Permission 或 Fallback 判断。
 
 这种方式减少 Token，但不丢失可追溯证据。
 

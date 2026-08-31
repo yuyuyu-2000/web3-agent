@@ -49,8 +49,17 @@ class AgentState(TypedDict):
     permission_action: NotRequired[Literal["ALLOW", "NEED_CONFIRM", "DENY"] | None]
     clarified_state: NotRequired[dict[str, Any]]
     state_validation: NotRequired[dict[str, Any] | None]
-    state_validation_action: NotRequired[Literal["VALID", "MISSING"] | None]
-    block_resolution: NotRequired[Literal["clarification", "partial", "fail"] | None]
+    state_validation_action: NotRequired[
+        Literal[
+            "VALID", "MISSING", "BLOCKED_TOOL_UNAVAILABLE", "FALLBACK", "EVALUATE"
+        ] | None
+    ]
+    block_resolution: NotRequired[
+        Literal["clarification", "fallback", "evaluate", "partial", "fail"] | None
+    ]
+    selected_fallback_tool: NotRequired[str | None]
+    fallback_original_tool: NotRequired[str | None]
+    fallback_pending: NotRequired[bool]
     pending_monitor_draft: NotRequired[dict[str, Any] | None]
     monitor_draft_version: NotRequired[int | None]
     monitor_draft_status: NotRequired[

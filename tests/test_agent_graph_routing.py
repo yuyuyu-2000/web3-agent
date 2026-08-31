@@ -23,6 +23,68 @@ def _settings() -> SimpleNamespace:
     )
 
 
+def test_synthetic_execution_summary_is_never_a_composer_draft() -> None:
+    synthetic = AIMessage(
+        content="结构化任务执行摘要：should-not-be-draft",
+        additional_kwargs={
+            graph_module._COMPOSER_MESSAGE_ROLE_KEY:
+                graph_module._EXECUTION_SUMMARY_ROLE,
+        },
+    )
+    state = {"execution_mode": "direct", "step_results": []}
+
+    assert graph_module._composer_draft(
+        state, [HumanMessage(content="question"), synthetic]
+    ) == ""
+
+
+def test_planned_deterministic_result_without_real_draft_is_empty() -> None:
+    state = {
+        "execution_mode": "planned",
+        "step_results": [{"step_id": "step_1", "summary": "deterministic result"}],
+    }
+
+    assert graph_module._composer_draft(
+        state, [HumanMessage(content="question")]
+    ) == ""
+
+
+def test_planned_executor_summary_is_not_duplicated_as_draft() -> None:
+    summary = "Executor generated the completed step summary."
+    state = {
+        "execution_mode": "planned",
+        "step_results": [{"step_id": "step_1", "summary": summary}],
+    }
+
+    assert graph_module._composer_draft(
+        state, [HumanMessage(content="question"), AIMessage(content=summary)]
+    ) == ""
+
+
+def test_direct_independent_draft_is_preserved() -> None:
+    draft = "A genuine direct-agent answer."
+    state = {"execution_mode": "direct", "step_results": []}
+
+    assert graph_module._composer_draft(
+        state, [HumanMessage(content="question"), AIMessage(content=draft)]
+    ) == draft
+
+
+def test_reviewer_revision_keeps_previous_answer_and_feedback() -> None:
+    state = {
+        "execution_mode": "planned",
+        "step_results": [{"step_id": "step_1", "summary": "step summary"}],
+        "review_feedback": "Clarify the evidence limitation.",
+    }
+    draft = graph_module._composer_draft(
+        state,
+        [HumanMessage(content="question"), AIMessage(content="previous answer")],
+    )
+
+    assert "previous answer" in draft
+    assert "Clarify the evidence limitation." in draft
+
+
 def test_graph_switches_between_direct_and_planned_on_same_thread() -> None:
     class FakeModel:
         def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]

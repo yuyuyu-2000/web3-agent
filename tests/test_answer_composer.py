@@ -21,6 +21,7 @@ from chaincloud_agent_service.agent.answer_composer.renderer import (
     build_answer_context,
     build_fallback_answer,
 )
+from chaincloud_agent_service.agent.context_builder import ContextBuilder
 
 
 def test_classify_tool_evidence_level() -> None:
@@ -157,3 +158,31 @@ def test_async_answer_composer_consumes_native_model_stream() -> None:
     )
 
     assert response.content == "逐段生成答案"
+
+
+def test_composer_context_keeps_execution_summary_evidence_and_provenance() -> None:
+    execution_summary = (
+        '{"step_results":[{"result_references":[{"result_id":"result-1",'
+        '"evidence_source":"company_database","raw_result_location":'
+        '"/tmp/result-1.json"}],"provenance":[{"result_id":"result-1"}]}]}'
+    )
+    evidence = ToolMessage(
+        content='{"row_count":1,"sample":[{"value":42}]}',
+        name="postgres_select",
+        tool_call_id="call-1",
+    )
+    context = ContextBuilder("test").answer_composer(
+        system_prompt="rules",
+        current_request="query",
+        execution_summary=execution_summary,
+        evidence=[evidence],
+        draft="",
+    )
+    rendered = "\n".join(str(message.content) for message in context.messages)
+
+    assert "result-1" in rendered
+    assert "company_database" in rendered
+    assert "/tmp/result-1.json" in rendered
+    assert "postgres_select" in rendered
+    assert '"value":42' in rendered
+    assert context.audit["category_tokens"]["draft"] == 0

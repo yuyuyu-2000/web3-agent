@@ -18,6 +18,11 @@ from chaincloud_agent_service.agent.evaluation import (
     evaluate_step,
     validate_deterministic_step,
 )
+from chaincloud_agent_service.agent.fallback_resolver import (
+    blocked_tool_unavailable,
+    resolve_fallback,
+    tool_is_available,
+)
 from chaincloud_agent_service.agent.planning import Plan, StepResult, create_plan
 from chaincloud_agent_service.agent.planning.planner import PLANNER_SYSTEM_PROMPT
 from chaincloud_agent_service.agent.permission import evaluate_step_permission
@@ -150,10 +155,17 @@ def _plan_from_state(state: AgentState) -> Plan:
     return Plan.model_validate(raw)
 
 
-def _step_execution_prompt(state: AgentState, *, max_step_tool_calls: int = MAX_STEP_TOOL_CALLS) -> str:
+def _current_step(state: AgentState) -> Any:
     plan = _plan_from_state(state)
     current_id = state.get("current_step_id")
     step = next(item for item in plan.steps if item.id == current_id)
+    selected = state.get("selected_fallback_tool")
+    return step.model_copy(update={"suggested_tools": [selected]}) if selected else step
+
+
+def _step_execution_prompt(state: AgentState, *, max_step_tool_calls: int = MAX_STEP_TOOL_CALLS) -> str:
+    plan = _plan_from_state(state)
+    step = _current_step(state)
     dependencies = {
         item["step_id"]: item
         for item in state.get("step_results", [])
@@ -168,10 +180,12 @@ def _step_execution_prompt(state: AgentState, *, max_step_tool_calls: int = MAX_
         f"建议工具：{', '.join(step.suggested_tools) or '由你按需选择'}\n"
         f"步骤重要性：{'关键' if step.critical else '非关键'}\n"
         f"允许的 fallback 工具：{', '.join(step.fallback_tools) or '无'}\n"
+        f"代码已选择的 fallback：{state.get('selected_fallback_tool') or '无'}\n"
         f"依赖步骤结果：{json.dumps(dependencies, ensure_ascii=False)}\n"
         f"用户补充的执行状态：{json.dumps(state.get('clarified_state', {}), ensure_ascii=False)}\n"
         f"本步骤剩余工具调用额度：{max_step_tool_calls - state.get('step_tool_call_count', 0)}\n"
         "需要数据时调用工具；已有足够信息时直接给出本步骤的结果摘要。"
+        "未经代码选择时不得自行调用 fallback，也不得从工具池猜测替代工具。"
     )
 
 
@@ -190,13 +204,66 @@ def _execution_summary(state: AgentState) -> str:
     )
 
 
+_COMPOSER_MESSAGE_ROLE_KEY = "chaincloud_composer_role"
+_EXECUTION_SUMMARY_ROLE = "execution_summary"
+
+
+def _is_synthetic_execution_summary(message: Any) -> bool:
+    metadata = getattr(message, "additional_kwargs", None)
+    return (
+        isinstance(metadata, dict)
+        and metadata.get(_COMPOSER_MESSAGE_ROLE_KEY) == _EXECUTION_SUMMARY_ROLE
+    )
+
+
+def _latest_turn_ai_draft(messages: list[Any]) -> str:
+    latest_user_index = max(
+        (index for index, message in enumerate(messages) if isinstance(message, HumanMessage)),
+        default=-1,
+    )
+    for message in reversed(messages[latest_user_index + 1 :]):
+        if not isinstance(message, AIMessage) or _tool_calls(message):
+            continue
+        if _is_synthetic_execution_summary(message):
+            continue
+        text = _message_text(message).strip()
+        if text:
+            return text
+    return ""
+
+
+def _composer_draft(state: AgentState, messages: list[Any]) -> str:
+    """Select only an independent draft; execution state has its own channel."""
+    previous_answer = _latest_turn_ai_draft(messages)
+    review_feedback = str(state.get("review_feedback") or "").strip()
+    if review_feedback:
+        parts = []
+        if previous_answer:
+            parts.append(f"上一版回答：\n{previous_answer}")
+        parts.append(f"Reviewer 修订要求：\n{review_feedback}")
+        return "\n\n".join(parts)
+    if state.get("execution_mode") == "direct":
+        return previous_answer
+    if not previous_answer:
+        return ""
+    step_summaries = {
+        str(item.get("summary") or "").strip()
+        for item in state.get("step_results", [])
+        if isinstance(item, dict) and str(item.get("summary") or "").strip()
+    }
+    return "" if previous_answer in step_summaries else previous_answer
+
+
 def compile_agent_graph(
     settings: Settings,
     checkpointer: BaseCheckpointSaver,
 ):
     tools = get_tools(settings)
+    registered_tools = {
+        str(getattr(tool, "name", tool.__class__.__name__)): tool for tool in tools
+    }
     available_tool_names = {
-        str(getattr(tool, "name", tool.__class__.__name__)) for tool in tools
+        name for name, tool in registered_tools.items() if tool_is_available(tool)
     }
     system_prompt = build_agent_system_prompt(settings)
     planner_trusted_schema_facts = build_planner_trusted_schema_facts(settings)
@@ -501,6 +568,9 @@ def compile_agent_graph(
             "state_validation": None,
             "state_validation_action": None,
             "block_resolution": None,
+            "selected_fallback_tool": None,
+            "fallback_original_tool": None,
+            "fallback_pending": False,
             "step_results": [],
             "candidate_step_result": None,
             "planner_attempts": 0,
@@ -566,6 +636,9 @@ def compile_agent_graph(
             "state_validation": None,
             "state_validation_action": None,
             "block_resolution": None,
+            "selected_fallback_tool": None,
+            "fallback_original_tool": None,
+            "fallback_pending": False,
             "step_results": [],
             "candidate_step_result": None,
             "step_message_start": len(state["messages"]),
@@ -672,6 +745,9 @@ def compile_agent_graph(
                 "state_validation": None,
                 "state_validation_action": None,
                 "block_resolution": None,
+                "selected_fallback_tool": None,
+                "fallback_original_tool": None,
+                "fallback_pending": False,
                 "status": "executing",
             }
 
@@ -692,9 +768,28 @@ def compile_agent_graph(
         return "permission" if state.get("status") == "executing" else "compose"
 
     def permission_gate_node(state: AgentState) -> dict[str, Any]:
-        plan = _plan_from_state(state)
         current_step_id = state.get("current_step_id")
-        step = next(item for item in plan.steps if item.id == current_step_id)
+        step = _current_step(state)
+        unavailable = [
+            name for name in step.suggested_tools if name not in available_tool_names
+        ]
+        if unavailable:
+            update: dict[str, Any] = {
+                "permission_action": "ALLOW",
+                "pending_permission": None,
+                "status": "executing",
+                "failure_reason": None,
+            }
+            append_trace_event(state, update, "decision_events", {
+                "trace_id": state.get("trace_id"),
+                "thread_id": state.get("trace_thread_id"),
+                "decision_type": "permission_gate",
+                "action": "allow",
+                "risk_level": None,
+                "reason": "工具不可用检查优先交给 State Validation；本节点不会执行该工具",
+                "step_id": current_step_id,
+            })
+            return update
         if "create_monitor_rule" in step.suggested_tools:
             return {
                 "permission_action": None, "pending_permission": None,
@@ -742,28 +837,93 @@ def compile_agent_graph(
         return "validate" if state.get("permission_action") == "ALLOW" else "finish"
 
     def state_validation_node(state: AgentState) -> dict[str, Any]:
-        plan = _plan_from_state(state)
         current_step_id = state.get("current_step_id")
-        step = next(item for item in plan.steps if item.id == current_step_id)
+        step = _current_step(state)
         messages = list(state["messages"])
         conversation_text = "\n".join(_message_text(message) for message in messages)
+        unavailable = [
+            name for name in step.suggested_tools if name not in available_tool_names
+        ]
+        blocked = None
+        resolution = None
+        if unavailable:
+            blocked, resolution = blocked_tool_unavailable(
+                step=step,
+                unavailable_tools=unavailable,
+                registered_tools=registered_tools,
+                available_tool_names=available_tool_names,
+                approved_permission_keys=state.get("approved_permission_keys", []),
+                remaining_budget=max(
+                    0, min(
+                        max_total_tool_calls - int(state.get("tool_call_count", 0)),
+                        int(state.get("step_tool_call_limit", DEFAULT_PLAN_STEP_TOOL_CALLS))
+                        - int(state.get("step_tool_call_count", 0)),
+                    ),
+                ),
+            )
         decision = validate_step_state(
             step,
             conversation_text=conversation_text,
             dependency_results=state.get("step_results", []),
             clarified_state=state.get("clarified_state", {}),
             available_tool_names=available_tool_names,
+            blocked_tool=blocked,
         )
-        return {
+        update: dict[str, Any] = {
             "state_validation": decision.model_dump(),
             "state_validation_action": decision.action,
             "block_resolution": decision.resolution,
             "status": "executing" if decision.action == "VALID" else "blocked_missing_state",
             "failure_reason": None if decision.action == "VALID" else decision.reason,
         }
+        if unavailable and resolution is not None:
+            original = unavailable[0]
+            if resolution.selected_tool:
+                update.update(
+                    selected_fallback_tool=resolution.selected_tool,
+                    fallback_original_tool=original,
+                    fallback_pending=False,
+                    state_validation_action="FALLBACK",
+                    block_resolution=None,
+                    status="executing",
+                    failure_reason=None,
+                )
+                outcome = "fallback_selected"
+            else:
+                update.update(
+                    candidate_step_result=StepResult(
+                        step_id=str(current_step_id), status="failed",
+                        summary="执行前检查发现计划工具不可用，且没有安全可用的 fallback。",
+                        error=json.dumps(blocked.model_dump(), ensure_ascii=False),
+                    ).model_dump(),
+                    state_validation_action="EVALUATE",
+                    status="executing",
+                )
+                outcome = "sent_to_evaluator"
+            append_trace_event(state, update, "decision_events", {
+                "trace_id": state.get("trace_id"),
+                "thread_id": state.get("trace_thread_id"),
+                "decision_type": "recovery",
+                "failure_stage": "state_validation",
+                "error_type": "blocked_tool_unavailable",
+                "original_tool": original,
+                "selected_fallback": resolution.selected_tool,
+                "recovery_action": "fallback" if resolution.selected_tool else "evaluate",
+                "attempt": 0,
+                "final_outcome": outcome,
+                "reason": resolution.reason,
+            })
+        return update
 
     def state_validation_route(state: AgentState) -> str:
-        return "execute" if state.get("state_validation_action") == "VALID" else "blocked"
+        action = state.get("state_validation_action")
+        if action == "VALID":
+            return "execute"
+        if action == "FALLBACK":
+            return "permission"
+        if action == "EVALUATE":
+            return "evaluate"
+        return "blocked"
 
     def blocked_missing_state_node(state: AgentState) -> dict[str, Any]:
         resolution = state.get("block_resolution") or "fail"
@@ -819,7 +979,9 @@ def compile_agent_graph(
         response, context, compact_update = reactive_retry(
             state, build, lambda built: executor_model.invoke(built.messages)
         )
-        update: dict[str, Any] = {**compact_update, "messages": [response]}
+        update: dict[str, Any] = {
+            **compact_update, "messages": [response], "fallback_pending": False,
+        }
         append_trace_event(state, update, "context_events", context.audit)
         return update
 
@@ -862,6 +1024,14 @@ def compile_agent_graph(
             )
         finally:
             reset_monitor_user(user_token)
+        if state.get("selected_fallback_tool"):
+            for event in result.get("tool_events", []):
+                if event.get("tool_name") == state.get("selected_fallback_tool"):
+                    event["original_tool"] = (
+                        state.get("fallback_original_tool")
+                        or event.get("original_tool")
+                    )
+                    event["selected_fallback"] = state.get("selected_fallback_tool")
         attempts = int(result.get("attempts", 0))
         errors = [
             payload for message in result.get("messages", [])
@@ -912,6 +1082,87 @@ def compile_agent_graph(
         plan = _plan_from_state(state)
         current_step_id = state.get("current_step_id")
         step = next(item for item in plan.steps if item.id == current_step_id)
+        errors = list(state.get("last_tool_errors", []))
+        if errors:
+            error = errors[-1]
+            error_type = str(error.get("error_type") or "tool_error")
+            original_tool = str(error.get("tool") or "unknown_tool")
+            repairable = error_type in {"argument_error", "schema_or_query_error", "schema_error"}
+            matching_failures = [
+                event for event in state.get("tool_events", [])
+                if event.get("step_id") == current_step_id
+                and event.get("tool_name") == original_tool
+                and event.get("status") == "error"
+                and event.get("error_type") == error_type
+            ]
+            if repairable and len(matching_failures) <= max_step_retries:
+                update: dict[str, Any] = {"candidate_step_result": None}
+                append_trace_event(state, update, "decision_events", {
+                    "trace_id": state.get("trace_id"),
+                    "thread_id": state.get("trace_thread_id"),
+                    "decision_type": "recovery",
+                    "failure_stage": "tool_execution",
+                    "error_type": error_type,
+                    "original_tool": original_tool,
+                    "selected_fallback": None,
+                    "recovery_action": "repair_arguments_or_schema",
+                    "attempt": len(matching_failures),
+                    "final_outcome": "returned_to_executor",
+                })
+                return update
+
+            remaining = max(
+                0, min(
+                    max_total_tool_calls - int(state.get("tool_call_count", 0)),
+                    int(state.get("step_tool_call_limit", DEFAULT_PLAN_STEP_TOOL_CALLS))
+                    - int(state.get("step_tool_call_count", 0)),
+                ),
+            )
+            resolution = resolve_fallback(
+                step=step,
+                original_tool=original_tool,
+                registered_tools=registered_tools,
+                available_tool_names=available_tool_names,
+                approved_permission_keys=state.get("approved_permission_keys", []),
+                remaining_budget=remaining,
+            )
+            update = {}
+            if resolution.selected_tool:
+                update.update(
+                    candidate_step_result=None,
+                    selected_fallback_tool=resolution.selected_tool,
+                    fallback_original_tool=original_tool,
+                    fallback_pending=True,
+                    status="executing",
+                )
+                recovery_action = "fallback"
+                final_outcome = "fallback_selected"
+            else:
+                update["candidate_step_result"] = StepResult(
+                    step_id=str(current_step_id),
+                    status="failed",
+                    summary="工具恢复已耗尽，且没有安全可用的 fallback。",
+                    evidence=[json.dumps(error, ensure_ascii=False)],
+                    tool_calls=[original_tool],
+                    error=json.dumps(error, ensure_ascii=False),
+                ).model_dump()
+                recovery_action = "evaluate"
+                final_outcome = "sent_to_evaluator"
+            append_trace_event(state, update, "decision_events", {
+                "trace_id": state.get("trace_id"),
+                "thread_id": state.get("trace_thread_id"),
+                "decision_type": "recovery",
+                "failure_stage": "tool_execution",
+                "error_type": error_type,
+                "original_tool": original_tool,
+                "selected_fallback": resolution.selected_tool,
+                "recovery_action": recovery_action,
+                "attempt": int(error.get("attempts") or len(matching_failures) or 1),
+                "final_outcome": final_outcome,
+                "reason": resolution.reason,
+            })
+            return update
+
         messages = list(state["messages"])
         step_messages = messages[int(state.get("step_message_start", 0)) :]
         decision = build_deterministic_step_result(
@@ -937,7 +1188,12 @@ def compile_agent_graph(
         return update
 
     def deterministic_step_result_route(state: AgentState) -> str:
-        return "machine_validator" if state.get("candidate_step_result") else "executor"
+        candidate = state.get("candidate_step_result")
+        if state.get("fallback_pending") and not candidate:
+            return "fallback"
+        if candidate and candidate.get("status") == "failed":
+            return "evaluator"
+        return "machine_validator" if candidate else "executor"
 
     def machine_step_validator_node(state: AgentState) -> dict[str, Any]:
         plan = _plan_from_state(state)
@@ -1190,6 +1446,9 @@ def compile_agent_graph(
             "state_validation": None,
             "state_validation_action": None,
             "block_resolution": None,
+            "selected_fallback_tool": None,
+            "fallback_original_tool": None,
+            "fallback_pending": False,
             "evaluation_action": None,
             "status": "planning",
             "failure_reason": None,
@@ -1219,8 +1478,14 @@ def compile_agent_graph(
 
     async def compose_answer_node(state: AgentState) -> dict[str, list[Any]]:
         messages = list(state["messages"])
+        draft = _composer_draft(state, messages)
         messages.append(
-            AIMessage(content=f"结构化任务执行摘要：\n{_execution_summary(state)}")
+            AIMessage(
+                content=f"结构化任务执行摘要：\n{_execution_summary(state)}",
+                additional_kwargs={
+                    _COMPOSER_MESSAGE_ROLE_KEY: _EXECUTION_SUMMARY_ROLE,
+                },
+            )
         )
         if state.get("review_feedback"):
             messages.append(
@@ -1241,7 +1506,6 @@ def compile_agent_graph(
             message for message in messages[latest_user_index + 1:]
             if isinstance(message, ToolMessage)
         ]
-        draft = next((_message_text(message) for message in reversed(messages) if isinstance(message, AIMessage) and not _tool_calls(message)), "")
         def build(current: AgentState):
             active = active_messages(current)
             memory = [message for message in active if isinstance(message, SystemMessage) and "长期记忆" in _message_text(message)]
@@ -1260,7 +1524,7 @@ def compile_agent_graph(
         try:
             response = await acompose_final_answer(
                 base_model, messages, model_messages=context.messages,
-                propagate_context_errors=True,
+                propagate_context_errors=True, fallback_draft=draft,
             )
         except Exception as exc:
             if not is_context_length_error(exc):
@@ -1276,7 +1540,7 @@ def compile_agent_graph(
             context = build(shadow)
             response = await acompose_final_answer(
                 base_model, messages, model_messages=context.messages,
-                propagate_context_errors=True,
+                propagate_context_errors=True, fallback_draft=draft,
             )
         update: dict[str, Any] = {**compact_update, "messages": [response]}
         append_trace_event(state, update, "context_events", context.audit)
@@ -1420,7 +1684,12 @@ def compile_agent_graph(
     builder.add_conditional_edges(
         "state_validation",
         state_validation_route,
-        {"execute": "executor", "blocked": "blocked_missing_state"},
+        {
+            "execute": "executor",
+            "permission": "permission_gate",
+            "evaluate": "evaluator",
+            "blocked": "blocked_missing_state",
+        },
     )
     builder.add_conditional_edges(
         "blocked_missing_state",
@@ -1448,7 +1717,12 @@ def compile_agent_graph(
         builder.add_conditional_edges(
             "deterministic_step_result",
             deterministic_step_result_route,
-            {"machine_validator": "machine_step_validator", "executor": "executor"},
+            {
+                "machine_validator": "machine_step_validator",
+                "executor": "executor",
+                "fallback": "permission_gate",
+                "evaluator": "evaluator",
+            },
         )
         builder.add_edge("machine_step_validator", "evaluator")
         builder.add_edge("permission_failure", "execution_completed")

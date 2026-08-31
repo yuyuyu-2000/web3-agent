@@ -326,6 +326,17 @@ class RecoveringToolNode:
             "retryable": retryable,
             "recovered": recovered,
             "fallback_tool": fallback_tool,
+            "failure_stage": "tool_execution",
+            "original_tool": tool_name,
+            "selected_fallback": fallback_tool,
+            "recovery_action": (
+                "recovered_after_retry" if status == "success" and recovered
+                else ("retry" if status == "error" and retryable else "none")
+            ),
+            "final_outcome": (
+                "success" if status == "success"
+                else ("retry_candidate" if retryable else "failed")
+            ),
         }
 
     @staticmethod
