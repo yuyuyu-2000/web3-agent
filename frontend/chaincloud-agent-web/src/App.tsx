@@ -12,6 +12,13 @@ import {
   summarizeMemory
 } from "./api";
 import LoginPage from "./LoginPage";
+import {
+  createThreadMemoryIdentity,
+  memoryBelongsToCurrentUser,
+  resolveActiveMemoryKey,
+  sanitizeKeyPrefix,
+  shouldAutoSummarize
+} from "./memorySession";
 import type {
   AuthTokenResponse,
   ChatMessage,
@@ -37,40 +44,9 @@ function nextPaint(): Promise<void> {
   return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
 }
 
-function sanitizeKeyPrefix(value: string | null | undefined): string {
-  const normalized = (value || "guest").trim().toLowerCase();
-  return normalized.replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "guest";
-}
-
-function makeThreadId(username?: string | null): string {
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const prefix = username ? sanitizeKeyPrefix(username) : "web";
-  return `${prefix}-thread-${date}-${Math.random().toString(16).slice(2, 8)}`;
-}
-
-function makeMemoryKey(username?: string | null): string {
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const prefix = username ? sanitizeKeyPrefix(username) : "web";
-  return `${prefix}-memory-${date}`;
-}
-
 function getMemoryStringMetadata(item: MemoryRecord, key: string): string | null {
   const value = item.metadata?.[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function memoryBelongsToCurrentUser(item: MemoryRecord, user: UserResponse | null): boolean {
-  if (!user) return false;
-
-  const metadataUserId = getMemoryStringMetadata(item, "user_id");
-  if (metadataUserId && metadataUserId === user.user_id) return true;
-
-  const metadataUsername = getMemoryStringMetadata(item, "username");
-  if (metadataUsername && metadataUsername === user.username) return true;
-
-  // Backward-compatible fallback for older memories that were named with username prefix.
-  const userPrefix = sanitizeKeyPrefix(user.username);
-  return item.memory_key.startsWith(`${userPrefix}-`);
 }
 
 function cleanupMemoryTitle(text: string): string {
@@ -573,13 +549,16 @@ function clearStoredAuthState(): void {
 }
 
 export default function App() {
+  const [initialIdentity] = useState(() =>
+    createThreadMemoryIdentity(loadStoredUser()?.username)
+  );
   const [authToken, setAuthToken] = useState(
     () => window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || ""
   );
   const [currentUser, setCurrentUser] = useState<UserResponse | null>(() => loadStoredUser());
 
-  const [threadId, setThreadId] = useState(() => makeThreadId(loadStoredUser()?.username));
-  const [memoryKey, setMemoryKey] = useState(() => makeMemoryKey(loadStoredUser()?.username));
+  const [threadId, setThreadId] = useState(initialIdentity.threadId);
+  const [memoryKey, setMemoryKey] = useState(initialIdentity.memoryKey);
   const [debug, setDebug] = useState(false);
   const [devMode, setDevMode] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -615,9 +594,7 @@ export default function App() {
   );
 
   const activeMemoryKey = useMemo(() => {
-    const key = memoryKey.trim();
-    if (!key) return undefined;
-    return visibleMemories.some((item) => item.memory_key === key) ? key : undefined;
+    return resolveActiveMemoryKey(memoryKey, visibleMemories);
   }, [memoryKey, visibleMemories]);
 
   const memoryKeyExists = Boolean(activeMemoryKey);
@@ -675,11 +652,12 @@ export default function App() {
   }, [authToken]);
 
   async function handleLoginSuccess(auth: AuthTokenResponse) {
+    const identity = createThreadMemoryIdentity(auth.user.username);
     storeAuthState(auth);
     setAuthToken(auth.access_token);
     setCurrentUser(auth.user);
-    setThreadId(makeThreadId(auth.user.username));
-    setMemoryKey(makeMemoryKey(auth.user.username));
+    setThreadId(identity.threadId);
+    setMemoryKey(identity.memoryKey);
     setPendingPermission(null);
     setPendingClarification(null);
     setPendingMonitorDraft(null);
@@ -695,11 +673,12 @@ export default function App() {
   }
 
   function handleLogout() {
+    const identity = createThreadMemoryIdentity();
     clearStoredAuthState();
     setAuthToken("");
     setCurrentUser(null);
-    setThreadId(makeThreadId());
-    setMemoryKey(makeMemoryKey());
+    setThreadId(identity.threadId);
+    setMemoryKey(identity.memoryKey);
     setPendingPermission(null);
     setPendingClarification(null);
     setPendingMonitorDraft(null);
@@ -800,7 +779,12 @@ export default function App() {
       const conversationCount = messages.filter(
         (m) => m.role === "user" || m.role === "assistant"
       ).length + 2; // +2 包括刚加入的 user 和 assistant
-      if (conversationCount >= AUTO_SUMMARIZE_THRESHOLD && !summarizing && !activeMemoryKey) {
+      if (shouldAutoSummarize(
+        conversationCount,
+        AUTO_SUMMARIZE_THRESHOLD,
+        summarizing,
+        activeMemoryKey
+      )) {
         void handleAutoSummarize();
       }
     } catch (error) {
@@ -934,8 +918,9 @@ export default function App() {
   }
 
   function handleNewChat() {
-    setThreadId(makeThreadId(currentUser?.username));
-    setMemoryKey(makeMemoryKey(currentUser?.username));
+    const identity = createThreadMemoryIdentity(currentUser?.username);
+    setThreadId(identity.threadId);
+    setMemoryKey(identity.memoryKey);
     setPendingPermission(null);
     setPendingClarification(null);
     setClarificationValues({});
